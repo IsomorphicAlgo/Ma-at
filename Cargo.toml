@@ -9,7 +9,9 @@ members = [
 
 # Shared metadata. Member crates opt in with `field.workspace = true`.
 [workspace.package]
-version = "0.1.0"
+# One minor version per completed stage until 1.0 (Methodology D-015): 0.1.0 was Stage 0,
+# 0.2.0 is Stage 1. Before 1.0 a minor bump may break the API.
+version = "0.2.0"
 edition = "2024"
 # MSRV: matches Ephemerust and Chronus Gateway. Raising it is a minor-version change.
 rust-version = "1.89"
@@ -19,8 +21,8 @@ repository = "https://github.com/IsomorphicAlgo/Ma-at"
 
 [workspace.dependencies]
 # The vehicle layer. `maat-ground` re-exports it as `maat_ground::flight`.
-maat-flight = { path = "crates/maat-flight", version = "0.1.0" }
-maat-ground = { path = "crates/maat-ground", version = "0.1.0" }
+maat-flight = { path = "crates/maat-flight", version = "0.2.0" }
+maat-ground = { path = "crates/maat-ground", version = "0.2.0" }
 
 # --- Human layer only. None of these may appear in `maat-flight` (see Methodology D-001). ---
 

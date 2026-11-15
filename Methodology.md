@@ -4,7 +4,7 @@ A living record of **why** the project is built the way it is: major decisions, 
 the reasoning behind them. Append new entries as decisions are made. Do not silently rewrite
 history; mark an entry superseded or amended instead.
 
-> **Status (2026-11-14): Stage 0 approved. Stage 1 built, awaiting owner sign-off.** Satellites
+> **Status (2026-11-14): version 0.2.0. Stage 0 approved. Stage 1 built, awaiting owner sign-off.** Satellites
 > load from OMM or TLE, and the window survey lists every contact opportunity for N satellites
 > over M stations. Stage 2 (the scheduler) has not started.
 
@@ -204,6 +204,22 @@ sentence could move there.
 of range, what to do about it). Flattening them to a string would throw that away.
 **Trade-off:** `AstroError` contains an I/O error and so cannot be cloned or compared. Tests match
 on variants with `matches!` instead of `assert_eq!`.
+
+### D-015 — Versioning: one minor version per stage until 1.0
+**Decision:** The three crates share one version. Stage 0 is 0.1.0, Stage 1 is 0.2.0, and each
+later stage takes the next minor version: 0.3.0 for the scheduler, 0.4.0 for explainable output,
+0.5.0 for the plug-ins and full CLI. Fixes within a stage are patch releases. 1.0.0 is for when
+the scheduler and its output have been used enough that the public API can be frozen.
+**Why 0.2.0 for Stage 1 and not 0.1.0:** Stage 1 changed the public API that Stage 0 set
+(`GroundError` lost `Clone` and `PartialEq`, see D-014). Before 1.0, Cargo treats a change of
+minor version as breaking and a change of patch version as compatible, so an incompatible change
+has to move the minor number. It also makes the version say where the project is: 0.2 has
+windows, 0.3 will have a scheduler.
+**Why not 1.0 yet:** The scheduler does not exist, and four of the ten reason codes have never
+been emitted. Calling that 1.0 would promise a stability the project has not earned.
+**Publishing:** Nothing is on crates.io yet. A version here records a state of the repository; a
+git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itself is taken there
+(O-1).
 
 ---
 

@@ -2,11 +2,15 @@
 
 All notable changes to this workspace are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before 1.0, a minor version bump may
-contain breaking changes.
+contain breaking changes. Until 1.0 there is one minor version per completed stage of the plan.
 
 ## [Unreleased]
 
-### Added — Stage 1: contact windows
+## [0.2.0] - 2026-11-14
+
+Stage 1: contact windows. Not published to crates.io.
+
+### Added
 
 - **`maat-ground`: satellites.** `Satellite` (identifier, name, epoch and an initialized SGP4
   propagator) built with `from_omm`, `from_omm_with_id` or `from_tle`, and `satellites_from_omm`,
@@ -36,7 +40,11 @@ contain breaking changes.
   `PartialEq`.
 - The repository is `https://github.com/IsomorphicAlgo/Ma-at`.
 
-### Added — Stage 0: core types and the `no_std` boundary
+## [0.1.0] - 2026-11-14
+
+Stage 0: core types and the `no_std` boundary. Not published to crates.io.
+
+### Added
 
 - **Workspace** with three crates: `maat-flight` (vehicle layer), `maat-ground` (human layer) and
   `maat-cli` (the `maat` command).
