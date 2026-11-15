@@ -6,10 +6,96 @@ contain breaking changes. Until 1.0 there is one minor version per completed sta
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-15
+
+Stage 4: files in, plans out. Not published to crates.io.
+
+### Added
+
+- **`maat plan`** (`maat-cli`): builds a contact plan from a satellite catalog and a TOML station
+  file. Options: `--catalog`, `--stations`, `--requests`, `--start`, `--hours`, `--scheduler`,
+  `--time-limit`, `--floor`, `--format`, `--station`, `--output`. The plan goes to standard
+  output; notes and warnings go to standard error. Exit status 0, 1 or 2.
+- **Station and request files**: `[[station]]` and `[[request]]` tables in TOML. Unknown keys are
+  errors and are reported with their line. Example files in `examples/`.
+- **Exports** (`maat-ground::export`):
+  - `satnogs_schedule`, `SatnogsIds`, `SatnogsSchedule`: scheduled passes as SatNOGS Network
+    observations (`ground_station`, `transmitter_uuid`, `start`, `end`). Passes without a
+    SatNOGS station number or transmitter are listed as skipped, with the reason.
+  - `station_schedule`, `station_schedule_json`, `STATION_SCHEDULE_SCHEMA`
+    (`maat.station-schedule/1`): one station's scheduled passes, for a Chronus Gateway station.
+- **A floor for each satellite**: `PlanOptions::with_satellite_floor` and `--floor`. The optimal
+  scheduler gives no satellite less useful contact than the greedy plan does.
+  `Optimality::satellite_floor`, `SatelliteSummary::floor`, a FLOOR column in the text report
+  and `floor_s` in the JSON.
+- **TLE catalogs**: `satellites_from_tle` reads a file of two-line element sets, named or not.
+  `satellites_from_catalog` detects TLE or OMM.
+- **Element-age warning**: `maat plan` warns when element sets are more than 14 days from the
+  search window.
+- `GroundError::InvalidTransmitter`.
+
+### Changed
+
+- JSON plan (`maat.contact-plan/1`): `optimality` gains `satellite_floor`; each satellite gains
+  `floor_s`. Additions only.
+- `Optimality` and `SatelliteSummary` have a new field each. Both are `#[non_exhaustive]`.
+
+### Known limits
+
+- The SatNOGS output has never been sent to the SatNOGS Network.
+- Chronus Gateway 1.0.0-rc.1 has no schedule input, so nothing reads the station schedule yet.
+- On the example week the floor removes the optimal scheduler's entire gain over greedy.
+- The 14-day age threshold is a rule of thumb, not a measurement.
+
+### Tests
+
+- 471 in total (356 unit, 78 integration, 37 doctests).
+- The real `maat` binary is run on real files for every format and every error path.
+- The floor is checked against exhaustive search on 200 small problems.
+
 ## [0.4.0] - 2026-11-15
 
 Stages 2 and 3: the schedulers and explained contact plans. Not published to crates.io. Version
 0.3.0 was not issued, because the two stages were built together.
+
+**Revised on 2026-11-15, before sign-off**, to add the time to turn the antenna between passes
+and a time limit for the optimal scheduler. The version number was kept because 0.4.0 had not
+been published or approved. Code written against the first 0.4.0 needs two changes:
+`schedule::conflict` now takes `&StationRule` where it took a turnaround in `Seconds`, and
+`schedule::turnaround_for` is replaced by `schedule::rule_for`.
+
+### Added — turning time between passes
+
+- **`maat-flight`: `Azimuth` and `Pointing`.** A `ContactWindow` can record where the antenna
+  points at AOS and at LOS (`with_pointing`, `without_pointing`, `aos_pointing`,
+  `los_pointing`).
+- **`maat-flight`: `SlewRates`** and `StationRule::with_slew_rates`, `slew_time` and
+  `gap_needed`. Between two passes a station needs its fixed turnaround plus the time to turn
+  from the end of one to the start of the other, rounded up to whole seconds. Both schedulers
+  apply it.
+- **`MAAT-206`** (`ReasonCode::AzimuthOutOfRange`, `WindowError::AzimuthOutOfRange`).
+- **`maat-ground`:** `contact_windows` records each window's pointing; `GroundStation::rule`
+  carries the station's slew limits to the schedulers, rounded down. The plan's detail for
+  `MAAT-108` gives both parts of the time needed. `StationSummary::slew_rates`; a `SLEW AZ/EL`
+  column in the text report; `pointing` on each entry and `slew_rates_deg_per_s` on each station
+  in the JSON (additions only, so the layout is still `maat.contact-plan/1`).
+
+### Added — a time limit for the optimal scheduler
+
+- **`PlanOptions`** and **`plan_contacts_with`**: the optimal scheduler stops at
+  `optimal_time_limit` (`DEFAULT_OPTIMAL_TIME_LIMIT`, 60 s). `plan_contacts` uses the default.
+- The optimal scheduler **starts from the greedy plan** and falls back to it, so its plan is
+  never worth less than the greedy plan in total.
+- **`ContactPlan::optimality`** (`Optimality { proven, time_limit }`): whether the plan is
+  proven best. A plan cut short says "NOT PROVEN OPTIMAL" at the top of the text report and
+  carries `"optimality": { "proven": false, ... }` in the JSON.
+- **`time_until_first_pass(survey, now)`**: the longest limit that makes sense.
+
+### Fixed
+
+- The documentation of the first 0.4.0 said that the `microlp` solver has no time limit. It
+  has one, and it accepts a starting solution. Corrected in the README, `Methodology.md` (D-017,
+  D-021) and the `optimal` module docs.
 
 ### Added — Stage 2: scheduling
 
@@ -18,9 +104,9 @@ Stages 2 and 3: the schedulers and explained contact plans. Not published to cra
   `Decision` per window into a slice the caller provides. No allocation, no dependencies, and a
   run time proportional to the square of the number of windows.
   - `SatelliteRequest`: priority, minimum contact and contact need for one satellite.
-  - `StationRule`: a station's turnaround time between passes.
+  - `StationRule`: the time a station needs between passes.
   - `Decision`, `ScheduleSummary`, `ScheduleError`.
-  - `schedule::conflict`, `rank`, `screen`, `validate` and `turnaround_for`: the rules, exposed
+  - `schedule::conflict`, `rank`, `screen`, `validate` and `rule_for`: the rules, exposed
     so the optimal scheduler and the tests use the same ones.
 - **`maat-ground`: the optimal scheduler.** `Scheduler::Optimal` solves the same problem as an
   integer linear program (through `good_lp`, with the pure-Rust `microlp` solver) and returns
@@ -58,17 +144,23 @@ Stages 2 and 3: the schedulers and explained contact plans. Not published to cra
 
 ### Tests
 
-- 326 in total (247 unit, 53 integration, 26 doctests).
+- 385 in total (296 unit, 55 integration, 34 doctests).
 - Greedy plans: 400 random problems checked by a verifier written independently of the
   scheduler.
 - Optimal plans: equal to exhaustive search on 300 random problems of up to 16 windows, and
   never worth less than the greedy plan on larger ones.
+- Turning time: both random-problem verifiers generate pointing and slew rates; an end-to-end
+  test recomputes the gap each pair of passes at a slewing station needs, from the recorded
+  pointing, without the scheduler's own conflict check.
+- Time limit: plans built with no solving time, and with limits either side of the solve time,
+  are sound, worth at least the greedy plan, and called proven only when they are optimal.
 - End to end: the ground's greedy plan matches the flight scheduler run on a fixed-size array,
   decision for decision.
 
 ## [0.2.0] - 2026-11-14
 
-Stage 1: contact windows. Not published to crates.io.
+Stage 1: contact windows. Published to crates.io as `maat-flight`, `maat-ground` and `maat-cli`
+0.2.0.
 
 ### Added
 

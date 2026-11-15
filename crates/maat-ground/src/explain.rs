@@ -73,18 +73,22 @@ pub fn guidance(reason: ReasonCode) -> &'static str {
         }
         ReasonCode::StationTurnaround => {
             "The pass does not overlap another pass at its station, but it begins or ends closer \
-             to one than the station's turnaround time: the time the station needs to re-point \
-             its antenna and reconfigure its radio. The other pass ranks higher, so it is kept. \
-             Shorten the station's turnaround time if it is longer than the station really \
-             needs. The detail gives the gap and the turnaround time."
+             to one than the station needs between passes. That time has two parts: the \
+             station's fixed turnaround time, and, for a station with slew rates, the time to \
+             turn its antenna from where the earlier pass ends to where the later one begins. \
+             The other pass ranks higher, so it is kept. Shorten the turnaround time, or raise \
+             the slew rates, if they are more cautious than the station really is. The detail \
+             gives the gap and the time needed."
         }
         ReasonCode::OutweighedByPlan => {
             "The optimal scheduler left this pass out because it conflicts with a pass that is \
              in the plan, and swapping them would not raise the plan's total value. The value is \
              each satellite's useful contact time multiplied by its priority plus one, added up, \
              so unlike the greedy scheduler a long low-priority pass can outweigh a short \
-             high-priority one. To change the outcome, raise this satellite's priority or lower \
-             the other's. The detail names the pass that was kept."
+             high-priority one. In a plan built with a floor under every satellite, a swap is also \
+             refused if it would leave any satellite with less contact than the greedy plan \
+             gives it. To change the outcome, raise this satellite's priority or lower the \
+             other's. The detail names the pass that was kept."
         }
         ReasonCode::LosNotAfterAos => {
             "A contact window was given a loss-of-signal time that is not later than its \
@@ -102,13 +106,20 @@ pub fn guidance(reason: ReasonCode) -> &'static str {
              stored in hundredths of a degree, so the valid range is 0 to 9000. A negative \
              elevation means the satellite never rose above the horizon, which is not a pass."
         }
+        ReasonCode::AzimuthOutOfRange => {
+            "An azimuth is outside 0 to 360 degrees. In the flight layer azimuth is stored in \
+             hundredths of a degree clockwise from north, so the valid range is 0 to 35999; \
+             360 degrees is written as 0. Reduce the angle into that range before building the \
+             pointing."
+        }
         ReasonCode::DuplicateRequest => {
             "Two contact requests name the same satellite. The scheduler cannot tell which \
              priority, minimum contact and need to use, so it refuses the whole request. Combine \
              them into one request for that satellite."
         }
         ReasonCode::DuplicateStationRule => {
-            "Two station rules name the same station, so its turnaround time is ambiguous and \
+            "Two station rules name the same station, so the time it needs between passes is \
+             ambiguous and \
              the whole request is refused. Give each station at most one rule. On the ground \
              this means two stations were given the same identifier."
         }

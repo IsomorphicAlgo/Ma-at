@@ -1,8 +1,18 @@
 //! `maat`: the command-line front end for the Ma'at contact scheduler.
 //!
-//! This is a thin layer over `maat-ground`. It has two real commands so far, both about reason
-//! codes: `codes` prints the table and `explain` prints the guidance for one code. Both read
-//! straight from the library, so what a user sees cannot drift from what the scheduler emits.
+//! This is a thin layer over `maat-ground`:
+//!
+//! - `plan` reads a satellite catalog and a station file, and writes a contact plan as text,
+//!   JSON, SatNOGS observations or one station's schedule ([`run`], [`args`], [`scenario`]);
+//! - `codes` prints the reason-code table and `explain` the guidance for one code, both straight
+//!   from the library, so what a user sees cannot drift from what the scheduler emits.
+//!
+//! Exit status: 0 on success, 1 when the inputs could not be turned into a plan, 2 when the
+//! command line itself makes no sense.
+
+mod args;
+mod run;
+mod scenario;
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -10,24 +20,43 @@ use std::process::ExitCode;
 use maat_ground::flight::ReasonCode;
 use maat_ground::{guidance, parse_reason_code};
 
+use crate::args::PlanArgs;
+
 const USAGE: &str = "\
 Usage: maat <COMMAND>
 
 Commands:
+  plan            Build a contact plan from a satellite catalog and a station file
   codes           Print the MAAT-xxx reason-code table
   explain <CODE>  Explain one reason code and what would change the outcome
+
+Options for 'plan':
+  --catalog <FILE>      Satellites: OMM (JSON, KVN, XML or CSV) or two-line element sets
+  --stations <FILE>     TOML file of [[station]] tables; may also hold [[request]] tables
+  --requests <FILE>     A second TOML file, usually of [[request]] tables
+  --start <TIME>        Start of the search, e.g. 2026-08-01T12:00:00Z [default: now]
+  --hours <N>           Length of the search in hours [default: 24]
+  --scheduler <NAME>    greedy or optimal [default: greedy]
+  --time-limit <SEC>    Longest the optimal scheduler may search [default: 60]
+  --floor               Optimal only: no satellite gets less than the greedy plan gives it
+  --format <NAME>       text, json, satnogs or station [default: text]
+  --station <ID>        The station to write with --format station
+  --output <FILE>       Write to a file instead of standard output
 
 Options:
   -h, --help     Print help
   -V, --version  Print the version
+
+The plan goes to standard output; notes and warnings go to standard error.
 ";
 
 /// The widest line `explain` prints.
 const WRAP_COLUMNS: usize = 78;
 
 /// What the command line asked for.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum Command {
+    Plan(Box<PlanArgs>),
     Codes,
     Explain(ReasonCode),
     Help,
@@ -42,6 +71,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
     match words.as_slice() {
         [] | ["-h" | "--help" | "help"] => Ok(Command::Help),
         ["-V" | "--version"] => Ok(Command::Version),
+        ["plan", rest @ ..] => args::parse_plan(rest).map(|plan| Command::Plan(Box::new(plan))),
         ["codes"] => Ok(Command::Codes),
         ["explain"] => {
             Err("'explain' needs a reason code, for example: maat explain MAAT-101".to_owned())
@@ -103,9 +133,35 @@ fn wrap(text: &str, columns: usize) -> String {
     out
 }
 
+/// Runs `maat plan`: the plan to standard output or a file, notes to standard error.
+fn run_plan(plan: &PlanArgs) -> ExitCode {
+    let report = match run::plan(plan, chrono::Utc::now()) {
+        Ok(report) => report,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for note in &report.notes {
+        eprintln!("{note}");
+    }
+    match &plan.output {
+        None => print!("{}", report.output),
+        Some(path) => {
+            if let Err(error) = std::fs::write(path, &report.output) {
+                eprintln!("error: cannot write '{}': {error}", path.display());
+                return ExitCode::FAILURE;
+            }
+            eprintln!("wrote {} bytes to {}", report.output.len(), path.display());
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse(&args) {
+        Ok(Command::Plan(plan)) => run_plan(&plan),
         Ok(Command::Codes) => {
             print!("{}", render_codes());
             ExitCode::SUCCESS
@@ -151,6 +207,48 @@ mod tests {
         }
         for version in ["-V", "--version"] {
             assert_eq!(parse(&args(&[version])), Ok(Command::Version));
+        }
+    }
+
+    #[test]
+    fn plan_hands_its_options_to_the_plan_parser() {
+        let command = parse(&args(&[
+            "plan",
+            "--catalog",
+            "c.json",
+            "--stations",
+            "s.toml",
+        ]));
+        match command {
+            Ok(Command::Plan(plan)) => {
+                assert_eq!(plan.catalog, std::path::PathBuf::from("c.json"));
+                assert_eq!(plan.hours, 24.0);
+            }
+            other => panic!("expected a plan command, got {other:?}"),
+        }
+        // Its errors come back as usage errors.
+        assert_eq!(
+            parse(&args(&["plan", "--hours"])),
+            Err("--hours needs a value".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_usage_text_lists_every_plan_option_the_parser_accepts() {
+        for option in [
+            "--catalog",
+            "--stations",
+            "--requests",
+            "--start",
+            "--hours",
+            "--scheduler",
+            "--time-limit",
+            "--floor",
+            "--format",
+            "--station",
+            "--output",
+        ] {
+            assert!(USAGE.contains(option), "usage lacks {option}");
         }
     }
 

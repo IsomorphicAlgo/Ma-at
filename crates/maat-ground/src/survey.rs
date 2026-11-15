@@ -33,11 +33,15 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ephemerust::{AstroError, ObserverLocation, Pass, Propagator};
-use maat_flight::{ContactWindow, ReasonCode, SatelliteId, StationId, WindowError};
+use maat_flight::{
+    Azimuth, ContactWindow, Elevation, Pointing, ReasonCode, SatelliteId, StationId, Timestamp,
+    WindowError,
+};
 
 use crate::error::GroundError;
 use crate::satellite::{Satellite, check_unique_satellites};
 use crate::station::{GroundStation, SlewLimits};
+use crate::time::utc_from_timestamp;
 use crate::window::window_from_pass;
 
 /// The result of a window survey. See the [module docs](self).
@@ -254,7 +258,17 @@ fn file_pass(
     }
 
     match window_from_pass(satellite.id(), station.id(), pass) {
-        Ok(window) => survey.windows.push(window),
+        // Record where the antenna points at each end of the window, so that a scheduler can
+        // work out how long the station needs to turn from one pass to the next.
+        Ok(window) => match pointing_at_ends(satellite.propagator(), station.observer(), &window) {
+            Ok(Ok((aos, los))) => survey.windows.push(window.with_pointing(aos, los)),
+            Ok(Err(error)) => survey.failures.push(SurveyFailure {
+                satellite: satellite.id(),
+                station: station.id(),
+                error,
+            }),
+            Err(source) => return Err(source),
+        },
         // Rounding inward left nothing: the pass is shorter than the one-second resolution of a
         // contact window. That is a pass too short to use, not malformed input.
         Err(GroundError::Window(WindowError::LosNotAfterAos { .. })) => {
@@ -274,6 +288,51 @@ fn file_pass(
         }),
     }
     Ok(())
+}
+
+/// Where the antenna points at a window's AOS and LOS.
+///
+/// The look angles are taken at the window's own whole-second times, not at the pass's
+/// sub-second ones, so that they describe the window the scheduler will actually use.
+///
+/// The outer error is a propagation failure; the inner one is a time or angle that cannot be
+/// represented, which is reported as a failure for the pair and does not stop the survey.
+fn pointing_at_ends(
+    propagator: &Propagator,
+    observer: ObserverLocation,
+    window: &ContactWindow,
+) -> Result<Result<(Pointing, Pointing), GroundError>, AstroError> {
+    let at = |time: Timestamp| -> Result<Result<Pointing, GroundError>, AstroError> {
+        let utc = match utc_from_timestamp(time) {
+            Ok(utc) => utc,
+            Err(error) => return Ok(Err(error)),
+        };
+        let look = propagator.look_angles(utc, observer)?;
+        Ok(pointing_from_degrees(look.azimuth_deg, look.elevation_deg))
+    };
+    let (aos, los) = (at(window.aos())?, at(window.los())?);
+    Ok(aos.and_then(|aos| los.map(|los| (aos, los))))
+}
+
+/// Converts look angles in degrees to a flight [`Pointing`].
+///
+/// Azimuth is rounded to the nearest hundredth of a degree and wrapped into `[0, 360)`.
+/// Elevation is rounded down. An elevation a hair below the horizon, which rounding at the very
+/// edge of a pass can produce, is taken as the horizon; anything further out is an error.
+fn pointing_from_degrees(azimuth_deg: f64, elevation_deg: f64) -> Result<Pointing, GroundError> {
+    if !azimuth_deg.is_finite() || !(-0.5..=90.0).contains(&elevation_deg) {
+        return Err(GroundError::InvalidElevation {
+            degrees: elevation_deg,
+        });
+    }
+    // `rem_euclid` puts any finite angle in [0, 360); rounding can then land exactly on 36000,
+    // which is north again.
+    let azimuth = (azimuth_deg.rem_euclid(360.0) * 100.0).round() as u32 % 36_000;
+    let elevation = (elevation_deg.max(0.0) * 100.0).floor() as u16;
+    Ok(Pointing {
+        azimuth: Azimuth::from_centidegrees(azimuth as u16)?,
+        elevation: Elevation::from_centidegrees(elevation)?,
+    })
 }
 
 /// Fails if two stations share an identifier.
@@ -442,6 +501,81 @@ mod tests {
             10.0,
         )
         .unwrap()
+    }
+
+    // --- Pointing ------------------------------------------------------------------------------
+
+    #[test]
+    fn pointing_rounds_azimuth_to_the_nearest_hundredth_and_elevation_down() {
+        let pointing = pointing_from_degrees(123.456, 10.019).unwrap();
+        assert_eq!(pointing.azimuth.centidegrees(), 12_346);
+        assert_eq!(pointing.elevation.centidegrees(), 1_001);
+        let pointing = pointing_from_degrees(123.454, 10.0).unwrap();
+        assert_eq!(pointing.azimuth.centidegrees(), 12_345);
+        assert_eq!(pointing.elevation.centidegrees(), 1_000);
+    }
+
+    #[test]
+    fn azimuth_wraps_into_one_turn() {
+        let azimuth = |degrees: f64| {
+            pointing_from_degrees(degrees, 10.0)
+                .unwrap()
+                .azimuth
+                .centidegrees()
+        };
+        assert_eq!(azimuth(0.0), 0);
+        assert_eq!(azimuth(359.99), 35_999);
+        // Rounds up to a full turn, which is north again.
+        assert_eq!(azimuth(359.996), 0);
+        assert_eq!(azimuth(360.0), 0);
+        assert_eq!(azimuth(-90.0), 27_000);
+        assert_eq!(azimuth(725.5), 550);
+    }
+
+    #[test]
+    fn an_elevation_a_hair_below_the_horizon_is_the_horizon() {
+        assert_eq!(
+            pointing_from_degrees(10.0, -0.2)
+                .unwrap()
+                .elevation
+                .centidegrees(),
+            0
+        );
+        assert_eq!(
+            pointing_from_degrees(10.0, 90.0)
+                .unwrap()
+                .elevation
+                .centidegrees(),
+            9_000
+        );
+    }
+
+    #[test]
+    fn angles_that_are_not_a_direction_in_the_sky_are_refused() {
+        for (azimuth, elevation) in [
+            (10.0, -0.6),
+            (10.0, 90.01),
+            (10.0, f64::NAN),
+            (f64::NAN, 10.0),
+            (f64::INFINITY, 10.0),
+        ] {
+            assert!(
+                pointing_from_degrees(azimuth, elevation).is_err(),
+                "{azimuth} {elevation}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_surveyed_window_records_its_pointing() {
+        let (satellite, station, passes) = seattle_passes();
+        let start = satellite.epoch();
+        let survey =
+            contact_windows(&[satellite], &[station], start, start + Duration::days(3)).unwrap();
+        assert_eq!(survey.windows.len(), passes.len());
+        for window in &survey.windows {
+            assert!(window.aos_pointing().is_some() && window.los_pointing().is_some());
+        }
     }
 
     /// Three days of ISS passes over Seattle, straight from Ephemerust: 16 passes peaking from

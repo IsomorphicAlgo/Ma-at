@@ -195,6 +195,10 @@ reason_codes! {
     DuplicateStationRule = 205, "MAAT-205", InvalidInput,
         "invalid request: a station has more than one rule";
 
+    /// An azimuth is not a compass direction from 0 up to, but not including, 360 degrees.
+    AzimuthOutOfRange = 206, "MAAT-206", InvalidInput,
+        "invalid window: an azimuth is outside 0 to 360 degrees";
+
     /// A fixed-size buffer was full, so the pass could not be evaluated.
     CapacityExceeded = 301, "MAAT-301", ResourceLimit,
         "not evaluated: a fixed-size plan buffer is full";
@@ -244,6 +248,7 @@ mod tests {
         (ReasonCode::ElevationOutOfRange, 203, "MAAT-203"),
         (ReasonCode::DuplicateRequest, 204, "MAAT-204"),
         (ReasonCode::DuplicateStationRule, 205, "MAAT-205"),
+        (ReasonCode::AzimuthOutOfRange, 206, "MAAT-206"),
         (ReasonCode::CapacityExceeded, 301, "MAAT-301"),
     ];
 

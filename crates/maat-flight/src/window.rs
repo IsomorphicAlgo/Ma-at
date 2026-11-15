@@ -61,6 +61,95 @@ impl fmt::Display for Elevation {
     }
 }
 
+/// A compass direction, stored as whole hundredths of a degree.
+///
+/// North is 0, east is 90 degrees, and the value runs clockwise up to, but not including, a full
+/// turn of 360 degrees.
+///
+/// ```
+/// use maat_flight::Azimuth;
+///
+/// let east = Azimuth::from_centidegrees(9_000)?;
+/// let north_west = Azimuth::from_centidegrees(31_500)?;
+/// // The short way round from east to north-west is 135 degrees, through north.
+/// assert_eq!(east.separation(north_west), 13_500);
+/// assert!(Azimuth::from_centidegrees(36_000).is_err());
+/// # Ok::<(), maat_flight::WindowError>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Azimuth(u16);
+
+impl Azimuth {
+    /// A full turn, 360.00 degrees. Valid raw values are below this.
+    pub const FULL_TURN_CENTIDEGREES: u16 = 36_000;
+    /// 0.00 degrees: due north.
+    pub const NORTH: Self = Self(0);
+
+    /// Builds an azimuth from hundredths of a degree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowError::AzimuthOutOfRange`] if the value is 36000 (360.00 degrees) or more.
+    pub const fn from_centidegrees(centidegrees: u16) -> Result<Self, WindowError> {
+        if centidegrees >= Self::FULL_TURN_CENTIDEGREES {
+            Err(WindowError::AzimuthOutOfRange { centidegrees })
+        } else {
+            Ok(Self(centidegrees))
+        }
+    }
+
+    /// Returns the azimuth in hundredths of a degree, from `0` to `35999`.
+    #[must_use]
+    pub const fn centidegrees(self) -> u16 {
+        self.0
+    }
+
+    /// The angle between two azimuths going the short way round, in hundredths of a degree.
+    ///
+    /// The result is from `0` to `18000` (half a turn). This is how far an antenna that can
+    /// turn freely in azimuth has to move to get from one direction to the other.
+    #[must_use]
+    pub const fn separation(self, other: Self) -> u16 {
+        let direct = self.0.abs_diff(other.0);
+        let round_the_back = Self::FULL_TURN_CENTIDEGREES.saturating_sub(direct);
+        if direct < round_the_back {
+            direct
+        } else {
+            round_the_back
+        }
+    }
+}
+
+impl fmt::Display for Azimuth {
+    /// Writes the azimuth in degrees with two decimals, for example `271.50 deg`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Dividing by a non-zero constant cannot overflow or panic.
+        let whole = self.0 / 100;
+        let hundredths = self.0 % 100;
+        write!(f, "{whole}.{hundredths:02} deg")
+    }
+}
+
+/// Where an antenna points: a compass direction and a height above the horizon.
+///
+/// ```
+/// use maat_flight::{Azimuth, Elevation, Pointing};
+///
+/// let rising = Pointing {
+///     azimuth: Azimuth::from_centidegrees(21_000)?,
+///     elevation: Elevation::from_centidegrees(1_000)?,
+/// };
+/// assert_eq!(rising.azimuth.centidegrees(), 21_000);
+/// # Ok::<(), maat_flight::WindowError>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Pointing {
+    /// The compass direction.
+    pub azimuth: Azimuth,
+    /// The height above the horizon.
+    pub elevation: Elevation,
+}
+
 /// One opportunity for one satellite to talk to one ground station.
 ///
 /// The window is the **half-open** interval `[aos, los)`: in contact at acquisition of signal
@@ -93,6 +182,8 @@ pub struct ContactWindow {
     // Computed once in `new`, where the subtraction is checked, so `duration()` cannot fail.
     duration: Seconds,
     max_elevation: Elevation,
+    // Where the antenna points at AOS and at LOS, when known. Both or neither.
+    pointing: Option<(Pointing, Pointing)>,
 }
 
 impl ContactWindow {
@@ -122,7 +213,69 @@ impl ContactWindow {
             los,
             duration,
             max_elevation,
+            pointing: None,
         })
+    }
+
+    /// Returns the window with the antenna's pointing at AOS and at LOS recorded.
+    ///
+    /// A scheduler uses these to work out how long a station needs to turn its antenna from the
+    /// end of one pass to the start of the next (see
+    /// [`StationRule::slew_time`](crate::StationRule::slew_time)). A window without pointing is
+    /// still valid: only the station's fixed turnaround time is applied to it.
+    ///
+    /// ```
+    /// use maat_flight::{
+    ///     Azimuth, ContactWindow, Elevation, Pointing, SatelliteId, StationId, Timestamp,
+    /// };
+    ///
+    /// let at = |azimuth, elevation| -> Result<Pointing, maat_flight::WindowError> {
+    ///     Ok(Pointing {
+    ///         azimuth: Azimuth::from_centidegrees(azimuth)?,
+    ///         elevation: Elevation::from_centidegrees(elevation)?,
+    ///     })
+    /// };
+    /// let pass = ContactWindow::new(
+    ///     SatelliteId::new(25544),
+    ///     StationId::new(1),
+    ///     Timestamp::from_unix_seconds(0),
+    ///     Timestamp::from_unix_seconds(600),
+    ///     Elevation::from_centidegrees(4_500)?,
+    /// )?
+    /// .with_pointing(at(21_000, 1_000)?, at(4_500, 1_000)?); // rises south-west, sets north-east
+    ///
+    /// assert_eq!(pass.los_pointing().map(|p| p.azimuth.centidegrees()), Some(4_500));
+    /// # Ok::<(), maat_flight::WindowError>(())
+    /// ```
+    #[must_use]
+    pub const fn with_pointing(mut self, aos: Pointing, los: Pointing) -> Self {
+        self.pointing = Some((aos, los));
+        self
+    }
+
+    /// Returns the window with its pointing removed.
+    #[must_use]
+    pub const fn without_pointing(mut self) -> Self {
+        self.pointing = None;
+        self
+    }
+
+    /// Where the antenna points at AOS, if the window records it.
+    #[must_use]
+    pub const fn aos_pointing(&self) -> Option<Pointing> {
+        match self.pointing {
+            Some((aos, _)) => Some(aos),
+            None => None,
+        }
+    }
+
+    /// Where the antenna points at LOS, if the window records it.
+    #[must_use]
+    pub const fn los_pointing(&self) -> Option<Pointing> {
+        match self.pointing {
+            Some((_, los)) => Some(los),
+            None => None,
+        }
     }
 
     /// The satellite this window is for.
@@ -204,6 +357,11 @@ pub enum WindowError {
         /// The raw value that was given, in hundredths of a degree.
         centidegrees: u16,
     },
+    /// An azimuth of 360.00 degrees or more.
+    AzimuthOutOfRange {
+        /// The raw value that was given, in hundredths of a degree.
+        centidegrees: u16,
+    },
 }
 
 impl WindowError {
@@ -214,6 +372,7 @@ impl WindowError {
             Self::LosNotAfterAos { .. } => ReasonCode::LosNotAfterAos,
             Self::TooLong { .. } => ReasonCode::WindowTooLong,
             Self::ElevationOutOfRange { .. } => ReasonCode::ElevationOutOfRange,
+            Self::AzimuthOutOfRange { .. } => ReasonCode::AzimuthOutOfRange,
         }
     }
 }
@@ -238,6 +397,13 @@ impl fmt::Display for WindowError {
                 "{id}: elevation {centidegrees} is above {}, the value for 90.00 degrees; \
                  elevation is given in hundredths of a degree from the horizon (0) to the zenith",
                 Elevation::MAX_CENTIDEGREES
+            ),
+            Self::AzimuthOutOfRange { centidegrees } => write!(
+                f,
+                "{id}: azimuth {centidegrees} is not below {}, the value for a full turn; \
+                 azimuth is given in hundredths of a degree clockwise from north, and 360 \
+                 degrees is written as 0",
+                Azimuth::FULL_TURN_CENTIDEGREES
             ),
         }
     }
@@ -301,6 +467,104 @@ mod tests {
         assert_eq!(display(5), "0.05 deg");
         assert_eq!(display(4_725), "47.25 deg");
         assert_eq!(display(9_000), "90.00 deg");
+    }
+
+    // --- Azimuth -------------------------------------------------------------------------------
+
+    fn az(centidegrees: u16) -> Azimuth {
+        Azimuth::from_centidegrees(centidegrees).unwrap()
+    }
+
+    #[test]
+    fn azimuth_accepts_north_up_to_just_short_of_a_full_turn() {
+        assert_eq!(Azimuth::from_centidegrees(0), Ok(Azimuth::NORTH));
+        assert_eq!(az(35_999).centidegrees(), 35_999);
+    }
+
+    #[test]
+    fn azimuth_rejects_a_full_turn_and_beyond() {
+        // 360 degrees is the same direction as 0 and must be written as 0, so that equal
+        // directions always compare equal.
+        assert_eq!(
+            Azimuth::from_centidegrees(36_000),
+            Err(WindowError::AzimuthOutOfRange {
+                centidegrees: 36_000
+            })
+        );
+        assert!(Azimuth::from_centidegrees(u16::MAX).is_err());
+    }
+
+    #[test]
+    fn separation_takes_the_short_way_round() {
+        assert_eq!(az(1_000).separation(az(3_000)), 2_000);
+        assert_eq!(az(3_000).separation(az(1_000)), 2_000);
+        // Through north: 350 to 10 degrees is 20 degrees, not 340.
+        assert_eq!(az(35_000).separation(az(1_000)), 2_000);
+        assert_eq!(az(0).separation(az(35_999)), 1);
+        assert_eq!(az(12_345).separation(az(12_345)), 0);
+    }
+
+    #[test]
+    fn separation_is_at_most_half_a_turn_and_symmetric() {
+        // Every pair on a 7.5 degree grid, checked against the definition worked out in signed
+        // arithmetic.
+        let grid: std::vec::Vec<u16> = (0..48).map(|i| i * 750).collect();
+        for &a in &grid {
+            for &b in &grid {
+                let separation = az(a).separation(az(b));
+                assert!(separation <= 18_000, "{a} to {b}: {separation}");
+                assert_eq!(separation, az(b).separation(az(a)));
+                let direct = (i32::from(a) - i32::from(b)).abs();
+                assert_eq!(i32::from(separation), direct.min(36_000 - direct));
+            }
+        }
+        assert_eq!(az(0).separation(az(18_000)), 18_000);
+    }
+
+    #[test]
+    fn azimuth_displays_degrees_with_two_decimals() {
+        assert_eq!(format!("{}", az(0)), "0.00 deg");
+        assert_eq!(format!("{}", az(27_150)), "271.50 deg");
+        assert_eq!(format!("{}", az(35_999)), "359.99 deg");
+    }
+
+    // --- Pointing on a window ------------------------------------------------------------------
+
+    fn pointing(azimuth: u16, elevation: u16) -> Pointing {
+        Pointing {
+            azimuth: az(azimuth),
+            elevation: Elevation::from_centidegrees(elevation).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_new_window_records_no_pointing() {
+        let w = window(0, 600);
+        assert_eq!(w.aos_pointing(), None);
+        assert_eq!(w.los_pointing(), None);
+    }
+
+    #[test]
+    fn pointing_is_kept_at_each_end_and_can_be_removed() {
+        let (rise, set) = (pointing(21_000, 1_000), pointing(4_500, 1_200));
+        let w = window(0, 600).with_pointing(rise, set);
+        assert_eq!(w.aos_pointing(), Some(rise));
+        assert_eq!(w.los_pointing(), Some(set));
+        // Everything else is untouched.
+        assert_eq!(
+            (w.aos(), w.los(), w.duration()),
+            (t(0), t(600), Seconds::new(600))
+        );
+        assert_eq!(w.without_pointing(), window(0, 600));
+    }
+
+    #[test]
+    fn windows_that_differ_only_in_pointing_are_different_windows() {
+        let plain = window(0, 600);
+        let pointed = plain.with_pointing(pointing(0, 0), pointing(9_000, 0));
+        assert_ne!(plain, pointed);
+        // Time comparisons ignore pointing.
+        assert!(plain.overlaps(&pointed));
     }
 
     // --- ContactWindow construction ------------------------------------------------------------
@@ -470,6 +734,15 @@ mod tests {
         assert_eq!(inverted.reason(), ReasonCode::LosNotAfterAos);
         assert_eq!(too_long.reason(), ReasonCode::WindowTooLong);
         assert_eq!(elevation.reason(), ReasonCode::ElevationOutOfRange);
+        let azimuth = WindowError::AzimuthOutOfRange {
+            centidegrees: 36_000,
+        };
+        assert_eq!(azimuth.reason(), ReasonCode::AzimuthOutOfRange);
+        let message = azimuth.to_string();
+        assert!(
+            message.starts_with("MAAT-206: ") && message.contains("36000"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -25,8 +25,8 @@
 //! ## What "flight-suitable" means here
 //!
 //! - **`#![no_std]`, no heap.** The crate depends on `core` and nothing else. It never allocates.
-//! - **Integer-only.** Time is whole UTC seconds ([`Timestamp`], [`Seconds`]) and elevation is
-//!   hundredths of a degree ([`Elevation`]). No floating point means results are bit-identical on
+//! - **Integer-only.** Time is whole UTC seconds ([`Timestamp`], [`Seconds`]); azimuth and
+//!   elevation are hundredths of a degree ([`Azimuth`], [`Elevation`]). No floating point means results are bit-identical on
 //!   every processor, and every type is `Eq` and `Hash`.
 //! - **No panic paths.** `unwrap`, `expect`, `panic!`, slice indexing and unchecked arithmetic
 //!   are denied by lint. Fallible operations return `Option` or `Result`.
@@ -46,6 +46,9 @@
 //! - A contact window is the **half-open** interval `[aos, los)`: the satellite is in contact at
 //!   `aos` and no longer in contact at `los`. Two windows that merely touch do not overlap.
 //! - A higher [`Priority`] value wins.
+//! - Between two passes a station needs its fixed turnaround time plus, if its [`StationRule`]
+//!   has [`SlewRates`] and both windows record their [`Pointing`], the time to turn its antenna
+//!   from where the first pass ends to where the second begins.
 //! - Reason codes are stable. Once published, a `MAAT-xxx` number never changes meaning.
 //!
 //! ## Example
@@ -79,8 +82,8 @@ pub mod window;
 pub use ids::{Priority, SatelliteId, StationId};
 pub use reason::{ReasonClass, ReasonCode};
 pub use schedule::{
-    Conflict, Decision, SatelliteRequest, ScheduleError, ScheduleSummary, StationRule,
+    Conflict, Decision, SatelliteRequest, ScheduleError, ScheduleSummary, SlewRates, StationRule,
     schedule_greedy,
 };
 pub use time::{Seconds, Timestamp};
-pub use window::{ContactWindow, Elevation, WindowError};
+pub use window::{Azimuth, ContactWindow, Elevation, Pointing, WindowError};

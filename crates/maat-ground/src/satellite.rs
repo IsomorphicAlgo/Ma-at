@@ -183,6 +183,98 @@ pub fn satellites_from_omm(text: &str) -> Result<Vec<Satellite>, GroundError> {
     Ok(satellites)
 }
 
+/// Loads every satellite in a file of two-line element sets.
+///
+/// Each set is two lines, or three when a name line comes first, as CelesTrak and Space-Track
+/// serve them. Blank lines are ignored. A satellite's identifier is its catalog number.
+///
+/// TLE cannot hold a catalog number above 99999. For newer objects use OMM
+/// ([`satellites_from_omm`]).
+///
+/// # Errors
+///
+/// - [`GroundError::Catalog`] if the text holds no element set, a set is malformed, or lines
+///   are left over after the last complete set.
+/// - [`GroundError::Elements`], [`GroundError::ImpossibleOrbit`] and
+///   [`GroundError::DuplicateSatellite`], as for [`satellites_from_omm`].
+///
+/// ```
+/// use maat_ground::satellites_from_tle;
+///
+/// // A public reference element set for the ISS, twice over with different numbers would be
+/// // two satellites; here there is one.
+/// let text = "ISS (ZARYA)
+/// 1 25544U 98067A   20194.88612269 -.00002218  00000-0 -31515-4 0  9992
+/// 2 25544  51.6461 221.2784 0001413  89.1723 280.4612 15.49507896236008
+/// ";
+/// let satellites = satellites_from_tle(text)?;
+/// assert_eq!(satellites.len(), 1);
+/// assert_eq!(satellites[0].name(), "ISS (ZARYA)");
+/// # Ok::<(), maat_ground::GroundError>(())
+/// ```
+pub fn satellites_from_tle(text: &str) -> Result<Vec<Satellite>, GroundError> {
+    let mut satellites = Vec::new();
+    // Lines gathered for the set being read: an optional name, then line 1, then line 2.
+    let mut set: Vec<&str> = Vec::new();
+    let parse = |set: &[&str]| -> Result<Satellite, GroundError> {
+        let tle = Tle::parse(&set.join("\n")).map_err(|source| GroundError::Catalog { source })?;
+        Satellite::from_tle(&tle)
+    };
+    for line in text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+    {
+        set.push(line);
+        // Line 2 ends a set. A name cannot be mistaken for it once line 1 has been seen.
+        let has_line_1 = set.iter().any(|l| is_tle_line(l, '1'));
+        if has_line_1 && is_tle_line(line, '2') {
+            satellites.push(parse(&set)?);
+            set.clear();
+        }
+    }
+    // Lines left over, or no lines at all: let the parser say what is wrong with them.
+    if !set.is_empty() || satellites.is_empty() {
+        satellites.push(parse(&set)?);
+    }
+    check_unique_satellites(&satellites)?;
+    Ok(satellites)
+}
+
+/// Whether a line looks like line `number` of a two-line element set: the line number, a
+/// space, and the length of an element line.
+fn is_tle_line(line: &str, number: char) -> bool {
+    let mut characters = line.chars();
+    // A real line is 69 characters. The length test keeps a short name that happens to begin
+    // "1 " or "2 " from being taken for one.
+    characters.next() == Some(number) && characters.next() == Some(' ') && line.len() >= 60
+}
+
+/// Loads a satellite catalog from text, working out whether it is two-line element sets or OMM.
+///
+/// Text in which a TLE line 1 is directly followed by a line 2 is read with
+/// [`satellites_from_tle`]. Anything else is read with [`satellites_from_omm`], which in turn
+/// detects JSON, KVN, XML or CSV.
+///
+/// # Errors
+///
+/// As for whichever of the two reads the text.
+pub fn satellites_from_catalog(text: &str) -> Result<Vec<Satellite>, GroundError> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let is_tle = lines
+        .windows(2)
+        .any(|pair| is_tle_line(pair[0], '1') && is_tle_line(pair[1], '2'));
+    if is_tle {
+        satellites_from_tle(text)
+    } else {
+        satellites_from_omm(text)
+    }
+}
+
 /// Fails if two satellites share an identifier.
 pub(crate) fn check_unique_satellites(satellites: &[Satellite]) -> Result<(), GroundError> {
     for (index, later) in satellites.iter().enumerate() {
@@ -510,6 +602,175 @@ mod tests {
         // against it silently would hide that.
         let error = satellites_from_omm("[]").unwrap_err();
         assert!(matches!(error, GroundError::Catalog { .. }), "{error:?}");
+    }
+
+    // --- TLE catalogs ---------------------------------------------------------------------------
+
+    /// The ISS element set with another catalog number and name. Synthetic: the orbit is the
+    /// same, only the identity changes. Each line's last digit is its checksum, so it is
+    /// worked out again.
+    fn tle_numbered(number: u32, name: Option<&str>) -> String {
+        let relabel = |line: &str| {
+            let body = format!("{}{number:05}{}", &line[..2], &line[7..68]);
+            let sum: u32 = body
+                .chars()
+                .map(|c| match c {
+                    '-' => 1,
+                    c => c.to_digit(10).unwrap_or(0),
+                })
+                .sum();
+            format!("{body}{}", sum % 10)
+        };
+        let lines: Vec<&str> = ISS_TLE.lines().collect();
+        let (one, two) = (relabel(lines[1]), relabel(lines[2]));
+        match name {
+            Some(name) => format!("{name}\n{one}\n{two}\n"),
+            None => format!("{one}\n{two}\n"),
+        }
+    }
+
+    #[test]
+    fn the_relabelled_element_set_is_still_the_reference_one() {
+        // Guards the helper: with the original number it must reproduce the original lines.
+        assert_eq!(
+            tle_numbered(25_544, Some("ISS (ZARYA)")).trim_end(),
+            ISS_TLE
+        );
+    }
+
+    #[test]
+    fn a_tle_file_of_named_sets_gives_one_satellite_per_set_in_order() {
+        let text = format!(
+            "{}{}{}",
+            tle_numbered(40_001, Some("FIRST")),
+            tle_numbered(40_002, Some("SECOND")),
+            tle_numbered(40_003, Some("THIRD"))
+        );
+        let satellites = satellites_from_tle(&text).unwrap();
+        let summary: Vec<(u32, &str)> = satellites
+            .iter()
+            .map(|s| (s.id().get(), s.name()))
+            .collect();
+        assert_eq!(
+            summary,
+            [(40_001, "FIRST"), (40_002, "SECOND"), (40_003, "THIRD")]
+        );
+    }
+
+    #[test]
+    fn a_tle_file_of_unnamed_sets_is_read_two_lines_at_a_time() {
+        let text = format!(
+            "{}{}",
+            tle_numbered(40_001, None),
+            tle_numbered(40_002, None)
+        );
+        let satellites = satellites_from_tle(&text).unwrap();
+        assert_eq!(satellites.len(), 2);
+        assert_eq!(satellites[1].id().get(), 40_002);
+        assert_eq!(satellites[1].name(), "catalog 40002");
+    }
+
+    #[test]
+    fn named_and_unnamed_sets_can_be_mixed() {
+        let text = format!(
+            "{}{}{}",
+            tle_numbered(40_001, None),
+            tle_numbered(40_002, Some("NAMED")),
+            tle_numbered(40_003, None)
+        );
+        let names: Vec<String> = satellites_from_tle(&text)
+            .unwrap()
+            .iter()
+            .map(|s| s.name().to_owned())
+            .collect();
+        assert_eq!(names, ["catalog 40001", "NAMED", "catalog 40003"]);
+    }
+
+    #[test]
+    fn blank_lines_and_windows_line_endings_are_ignored() {
+        let text = format!(
+            "\r\n{}\r\n\r\n{}\r\n",
+            tle_numbered(40_001, Some("FIRST")).replace('\n', "\r\n"),
+            tle_numbered(40_002, Some("SECOND")).replace('\n', "\r\n")
+        );
+        let satellites = satellites_from_tle(&text).unwrap();
+        assert_eq!(satellites.len(), 2);
+        assert_eq!(satellites[0].name(), "FIRST");
+    }
+
+    #[test]
+    fn a_name_that_begins_like_an_element_line_is_still_a_name() {
+        let text = tle_numbered(40_001, Some("2 FAST"));
+        let satellites = satellites_from_tle(&text).unwrap();
+        assert_eq!(satellites[0].name(), "2 FAST");
+    }
+
+    #[test]
+    fn lines_left_over_after_the_last_set_are_an_error() {
+        let whole = tle_numbered(40_001, Some("FIRST"));
+        let half: String = tle_numbered(40_002, Some("SECOND"))
+            .lines()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = satellites_from_tle(&format!("{whole}{half}\n")).unwrap_err();
+        assert!(matches!(error, GroundError::Catalog { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_tle_file_with_nothing_in_it_is_an_error_not_an_empty_list() {
+        for text in ["", "\n\n", "   \n"] {
+            let error = satellites_from_tle(text).unwrap_err();
+            assert!(matches!(error, GroundError::Catalog { .. }), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_corrupted_element_line_is_refused() {
+        // Change one digit without fixing the checksum.
+        let text = tle_numbered(40_001, Some("FIRST")).replace("51.6461", "51.6462");
+        let error = satellites_from_tle(&text).unwrap_err();
+        assert!(matches!(error, GroundError::Catalog { .. }), "{error}");
+    }
+
+    #[test]
+    fn the_same_object_twice_in_a_tle_file_is_refused() {
+        let text = format!(
+            "{}{}",
+            tle_numbered(40_001, Some("FIRST")),
+            tle_numbered(40_001, Some("AGAIN"))
+        );
+        let error = satellites_from_tle(&text).unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, GroundError::DuplicateSatellite { .. }));
+        assert!(
+            message.contains("FIRST") && message.contains("AGAIN"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_catalog_is_read_as_tle_or_omm_according_to_its_text() {
+        let tle = format!(
+            "{}{}",
+            tle_numbered(40_001, Some("FIRST")),
+            tle_numbered(40_002, None)
+        );
+        assert_eq!(satellites_from_catalog(&tle).unwrap().len(), 2);
+
+        let json = format!(
+            "[{},{}]",
+            omm_json(Some("A"), Some(65_001), 15.2),
+            omm_json(Some("B"), Some(100_123), 15.2)
+        );
+        let from_json = satellites_from_catalog(&json).unwrap();
+        assert_eq!(from_json.len(), 2);
+        assert_eq!(from_json[1].id().get(), 100_123);
+
+        // Text that is neither is reported by the OMM reader, which lists what it accepts.
+        let error = satellites_from_catalog("neither one nor the other").unwrap_err();
+        assert!(matches!(error, GroundError::Catalog { .. }));
+        assert!(error.hint().is_some());
     }
 
     #[test]

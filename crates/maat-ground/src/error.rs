@@ -97,6 +97,18 @@ pub enum GroundError {
         source: AstroError,
     },
 
+    /// A SatNOGS transmitter identifier is not in the form SatNOGS DB gives them.
+    #[error(
+        "the SatNOGS transmitter given for satellite {satellite} is {given:?}, expected the \
+         22 letters and digits that SatNOGS DB shows as the transmitter's UUID"
+    )]
+    InvalidTransmitter {
+        /// The satellite the transmitter was given for.
+        satellite: SatelliteId,
+        /// What was given.
+        given: String,
+    },
+
     /// An element set describes an orbit that passes through the Earth.
     #[error(
         "the element set for {satellite} describes an orbit whose lowest point is {depth:.0} km \
@@ -203,6 +215,7 @@ impl GroundError {
             | Self::Catalog { .. }
             | Self::Elements { .. }
             | Self::ImpossibleOrbit { .. }
+            | Self::InvalidTransmitter { .. }
             | Self::MissingCatalogNumber { .. }
             | Self::DuplicateSatellite { .. }
             | Self::DuplicateStation { .. }

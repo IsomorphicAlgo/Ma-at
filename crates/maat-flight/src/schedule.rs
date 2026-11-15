@@ -25,7 +25,7 @@
 //! | it is shorter than the satellite's minimum contact | `MAAT-103` |
 //! | passes already scheduled meet the satellite's need | `MAAT-104` |
 //! | it overlaps a scheduled pass at its station | `MAAT-101` (higher priority) or `MAAT-107` (tie) |
-//! | it is too close to a scheduled pass at its station to re-point | `MAAT-108` |
+//! | it is too close to a scheduled pass at its station for the station to turn round | `MAAT-108` |
 //! | its satellite is scheduled with another station at that time | `MAAT-102` |
 //!
 //! ## What "greedy" costs
@@ -45,7 +45,10 @@
 //!
 //! ## Assumptions
 //!
-//! - A station serves one satellite at a time.
+//! - A station serves one satellite at a time, and needs time between passes: a fixed
+//!   turnaround, plus the time to turn its antenna from the end of one pass to the start of the
+//!   next when the windows record where the antenna points (see [`StationRule`]).
+//! - An antenna turns the short way round in azimuth. A mount with a hard stop is not modelled.
 //! - A satellite talks to one station at a time.
 //! - A scheduled pass is used whole. A pass is never trimmed to fit.
 
@@ -55,7 +58,7 @@ use core::fmt;
 use crate::ids::{Priority, SatelliteId, StationId};
 use crate::reason::ReasonCode;
 use crate::time::Seconds;
-use crate::window::ContactWindow;
+use crate::window::{ContactWindow, Pointing};
 
 /// What one satellite is asking the scheduler for.
 ///
@@ -146,24 +149,152 @@ impl SatelliteRequest {
     }
 }
 
-/// A scheduling rule for one ground station.
+/// How fast a station's antenna can turn about each axis, in hundredths of a degree per second.
+///
+/// The scheduler uses this to work out how long the station needs between two passes: the
+/// further apart the end of one pass and the start of the next are in the sky, the longer the
+/// turn.
+///
+/// ```
+/// use maat_flight::SlewRates;
+///
+/// // 6 degrees per second in azimuth, 2.5 in elevation.
+/// let rates = SlewRates::new(600, 250).expect("both rates are above zero");
+/// assert_eq!(rates.azimuth_centidegrees_per_second(), 600);
+/// // A mount that cannot turn has no slew rate.
+/// assert!(SlewRates::new(0, 250).is_none());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlewRates {
+    azimuth: u16,
+    elevation: u16,
+}
+
+impl SlewRates {
+    /// Builds slew rates from hundredths of a degree per second.
+    ///
+    /// Returns `None` if either rate is zero: an axis that cannot move could never reach the
+    /// next pass, and a zero is far more likely to be a missing value than a real one.
+    #[must_use]
+    pub const fn new(
+        azimuth_centidegrees_per_second: u16,
+        elevation_centidegrees_per_second: u16,
+    ) -> Option<Self> {
+        if azimuth_centidegrees_per_second == 0 || elevation_centidegrees_per_second == 0 {
+            None
+        } else {
+            Some(Self {
+                azimuth: azimuth_centidegrees_per_second,
+                elevation: elevation_centidegrees_per_second,
+            })
+        }
+    }
+
+    /// The azimuth rate in hundredths of a degree per second.
+    #[must_use]
+    pub const fn azimuth_centidegrees_per_second(&self) -> u16 {
+        self.azimuth
+    }
+
+    /// The elevation rate in hundredths of a degree per second.
+    #[must_use]
+    pub const fn elevation_centidegrees_per_second(&self) -> u16 {
+        self.elevation
+    }
+
+    /// How long the antenna takes to turn from one pointing to another, in whole seconds,
+    /// rounded up.
+    ///
+    /// Both axes move at once, so the time is that of the slower axis. Azimuth goes the short
+    /// way round, which assumes a mount that can turn freely through north.
+    ///
+    /// ```
+    /// use maat_flight::{Azimuth, Elevation, Pointing, Seconds, SlewRates};
+    ///
+    /// let rates = SlewRates::new(600, 250).unwrap(); // 6 and 2.5 degrees per second
+    /// let at = |azimuth, elevation| Pointing {
+    ///     azimuth: Azimuth::from_centidegrees(azimuth).unwrap(),
+    ///     elevation: Elevation::from_centidegrees(elevation).unwrap(),
+    /// };
+    /// // 90 degrees of azimuth at 6 degrees per second is 15 s; elevation does not change.
+    /// assert_eq!(rates.slew_time(at(4_500, 1_000), at(13_500, 1_000)), Seconds::new(15));
+    /// // 91 degrees takes 15.17 s, which rounds up to 16.
+    /// assert_eq!(rates.slew_time(at(4_500, 1_000), at(13_600, 1_000)), Seconds::new(16));
+    /// ```
+    #[must_use]
+    pub fn slew_time(&self, from: Pointing, to: Pointing) -> Seconds {
+        let azimuth = seconds_to_turn(from.azimuth.separation(to.azimuth), self.azimuth);
+        let elevation = seconds_to_turn(
+            from.elevation
+                .centidegrees()
+                .abs_diff(to.elevation.centidegrees()),
+            self.elevation,
+        );
+        Seconds::new(azimuth.max(elevation))
+    }
+}
+
+/// Whole seconds, rounded up, to turn `angle` hundredths of a degree at `rate` per second.
+fn seconds_to_turn(angle: u16, rate: u16) -> u32 {
+    let (angle, rate) = (u32::from(angle), u32::from(rate));
+    // `rate` is never zero (see `SlewRates::new`), but nothing here relies on that: a zero rate
+    // reads as "never arrives" instead of dividing by zero.
+    angle
+        .checked_add(rate.saturating_sub(1))
+        .and_then(|rounded_up| rounded_up.checked_div(rate))
+        .unwrap_or(u32::MAX)
+}
+
+/// A scheduling rule for one ground station: how long it needs between passes.
+///
+/// The time needed between two passes has two parts:
+///
+/// - a **fixed turnaround**, the same after every pass: time to reconfigure the radio, settle
+///   the mount, or whatever the station needs regardless of where it points;
+/// - a **slew time** that depends on the two passes: how long the antenna takes to turn from
+///   where the first pass ends to where the next begins. It applies only when the rule has
+///   [`SlewRates`] and both windows record their pointing; otherwise it is zero.
 ///
 /// A station that has no rule needs no time between passes.
+///
+/// ```
+/// use maat_flight::{Seconds, SlewRates, StationId, StationRule};
+///
+/// let rule = StationRule::new(StationId::new(1), Seconds::new(30))
+///     .with_slew_rates(SlewRates::new(600, 250).unwrap());
+/// assert_eq!(rule.turnaround(), Seconds::new(30));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StationRule {
     station: StationId,
     turnaround: Seconds,
+    slew_rates: Option<SlewRates>,
 }
 
 impl StationRule {
-    /// A rule giving the station `turnaround` seconds between the end of one pass and the start
-    /// of the next: time to re-point the antenna and reconfigure the radio.
+    /// A rule giving the station a fixed `turnaround` between the end of one pass and the start
+    /// of the next, and no slew time.
     #[must_use]
     pub const fn new(station: StationId, turnaround: Seconds) -> Self {
         Self {
             station,
             turnaround,
+            slew_rates: None,
         }
+    }
+
+    /// The rule for a station that needs no time between passes.
+    #[must_use]
+    pub const fn none(station: StationId) -> Self {
+        Self::new(station, Seconds::ZERO)
+    }
+
+    /// Returns the rule with the antenna's slew rates set, so that the time between two passes
+    /// also covers the turn from one to the other.
+    #[must_use]
+    pub const fn with_slew_rates(mut self, rates: SlewRates) -> Self {
+        self.slew_rates = Some(rates);
+        self
     }
 
     /// The station this rule is for.
@@ -172,10 +303,39 @@ impl StationRule {
         self.station
     }
 
-    /// The time the station needs between passes.
+    /// The fixed time the station needs between passes, before any slew time.
     #[must_use]
     pub const fn turnaround(&self) -> Seconds {
         self.turnaround
+    }
+
+    /// The antenna's slew rates, if the rule has them.
+    #[must_use]
+    pub const fn slew_rates(&self) -> Option<SlewRates> {
+        self.slew_rates
+    }
+
+    /// How long the antenna takes to turn from the end of `earlier` to the start of `later`.
+    ///
+    /// Zero if the rule has no slew rates or either window does not record its pointing.
+    #[must_use]
+    pub fn slew_time(&self, earlier: &ContactWindow, later: &ContactWindow) -> Seconds {
+        match (
+            self.slew_rates,
+            earlier.los_pointing(),
+            later.aos_pointing(),
+        ) {
+            (Some(rates), Some(from), Some(to)) => rates.slew_time(from, to),
+            _ => Seconds::ZERO,
+        }
+    }
+
+    /// The whole time the station needs between the end of `earlier` and the start of `later`:
+    /// the fixed turnaround plus the slew time.
+    #[must_use]
+    pub fn gap_needed(&self, earlier: &ContactWindow, later: &ContactWindow) -> Seconds {
+        self.turnaround
+            .saturating_add(self.slew_time(earlier, later))
     }
 }
 
@@ -185,7 +345,8 @@ impl StationRule {
 pub enum Conflict {
     /// Same station, and the windows share at least one second.
     StationOverlap,
-    /// Same station, no shared second, but less than the turnaround time between them.
+    /// Same station, no shared second, but less time between them than the station needs to
+    /// turn round: its fixed turnaround plus the antenna's slew from one pass to the next.
     StationTurnaround,
     /// Same satellite at two different stations, and the windows share at least one second.
     SatelliteOverlap,
@@ -193,45 +354,48 @@ pub enum Conflict {
 
 /// Tells whether two windows can both be in a plan, and if not, why not.
 ///
-/// `turnaround` is the time their station needs between passes; it matters only when both
-/// windows are at the same station. This one function defines "conflict" for the whole project:
-/// the greedy scheduler, the optimal scheduler and the tests all call it.
+/// `rule` is the rule of the station the windows share; it matters only when both windows are at
+/// the same station. This one function defines "conflict" for the whole project: the greedy
+/// scheduler, the optimal scheduler and the tests all call it.
 ///
 /// ```
-/// use maat_flight::{Conflict, ContactWindow, Elevation, SatelliteId, Seconds, StationId, Timestamp};
+/// use maat_flight::{
+///     Conflict, ContactWindow, Elevation, SatelliteId, Seconds, StationId, StationRule, Timestamp,
+/// };
 /// use maat_flight::schedule::conflict;
 ///
-/// let window = |sat, station, aos, los| {
+/// let station = StationId::new(1);
+/// let window = |sat, aos, los| {
 ///     ContactWindow::new(
 ///         SatelliteId::new(sat),
-///         StationId::new(station),
+///         station,
 ///         Timestamp::from_unix_seconds(aos),
 ///         Timestamp::from_unix_seconds(los),
 ///         Elevation::ZENITH,
 ///     )
 ///     .unwrap()
 /// };
-/// let first = window(1, 1, 0, 600);
-/// let next = window(2, 1, 630, 900); // same station, 30 s later
+/// let first = window(1, 0, 600);
+/// let next = window(2, 630, 900); // same station, 30 s later
 ///
-/// assert_eq!(conflict(&first, &next, Seconds::ZERO), None);
-/// assert_eq!(conflict(&first, &next, Seconds::new(60)), Some(Conflict::StationTurnaround));
+/// assert_eq!(conflict(&first, &next, &StationRule::none(station)), None);
+/// let slow = StationRule::new(station, Seconds::new(60));
+/// assert_eq!(conflict(&first, &next, &slow), Some(Conflict::StationTurnaround));
 /// ```
 #[must_use]
-pub fn conflict(a: &ContactWindow, b: &ContactWindow, turnaround: Seconds) -> Option<Conflict> {
+pub fn conflict(a: &ContactWindow, b: &ContactWindow, rule: &StationRule) -> Option<Conflict> {
     let overlap = a.overlaps(b);
     if a.station() == b.station() {
         if overlap {
             return Some(Conflict::StationOverlap);
         }
-        // No overlap, so one window ends at or before the other begins. `seconds_until` is
-        // `None` when the gap is too long to hold in a `Seconds`, which is no conflict at all.
-        let gap = if a.los() <= b.aos() {
-            a.los().seconds_until(b.aos())
-        } else {
-            b.los().seconds_until(a.aos())
-        };
-        if gap.is_some_and(|gap| gap < turnaround) {
+        // No overlap, so one window ends at or before the other begins.
+        let (earlier, later) = if a.los() <= b.aos() { (a, b) } else { (b, a) };
+        // `seconds_until` is `None` when the gap is too long to hold in a `Seconds`, which is
+        // no conflict at all.
+        let gap = earlier.los().seconds_until(later.aos());
+        let needed = rule.gap_needed(earlier, later);
+        if gap.is_some_and(|gap| gap < needed) {
             return Some(Conflict::StationTurnaround);
         }
         return None;
@@ -554,7 +718,7 @@ fn judge(
         return Decision::decided(ReasonCode::NoRequest, Priority::LOWEST, None);
     };
     let priority = request.priority();
-    let turnaround = turnaround_for(stations, window.station());
+    let rule = rule_for(stations, window.station());
 
     let mut granted = Seconds::ZERO;
     let mut station_overlap: Option<(usize, Priority)> = None;
@@ -569,7 +733,7 @@ fn judge(
             granted = granted.saturating_add(other.duration());
         }
         // Keep the first blocker of each kind, so the answer does not depend on scan details.
-        match conflict(window, other, turnaround) {
+        match conflict(window, other, &rule) {
             Some(Conflict::StationOverlap) => {
                 station_overlap = station_overlap.or(Some((other_index, slot.priority)));
             }
@@ -617,13 +781,15 @@ pub fn validate(
     check_unique_rules(stations)
 }
 
-/// The turnaround time for a station: its rule's value, or zero if it has no rule.
+/// The rule for a station: its own if it has one, otherwise a rule that needs no time between
+/// passes.
 #[must_use]
-pub fn turnaround_for(stations: &[StationRule], station: StationId) -> Seconds {
+pub fn rule_for(stations: &[StationRule], station: StationId) -> StationRule {
     stations
         .iter()
         .find(|rule| rule.station == station)
-        .map_or(Seconds::ZERO, |rule| rule.turnaround)
+        .copied()
+        .unwrap_or(StationRule::none(station))
 }
 
 fn find_request(
@@ -671,7 +837,7 @@ mod tests {
 
     use super::*;
     use crate::time::Timestamp;
-    use crate::window::Elevation;
+    use crate::window::{Azimuth, Elevation};
     use std::format;
     use std::string::ToString;
     use std::vec;
@@ -696,6 +862,36 @@ mod tests {
 
     fn rule(station: u16, turnaround: u32) -> StationRule {
         StationRule::new(StationId::new(station), Seconds::new(turnaround))
+    }
+
+    /// `conflict` for two windows whose station has only a fixed turnaround time.
+    fn clash(a: &ContactWindow, b: &ContactWindow, turnaround: Seconds) -> Option<Conflict> {
+        conflict(a, b, &StationRule::new(a.station(), turnaround))
+    }
+
+    fn at(azimuth: u16, elevation: u16) -> Pointing {
+        Pointing {
+            azimuth: Azimuth::from_centidegrees(azimuth).unwrap(),
+            elevation: Elevation::from_centidegrees(elevation).unwrap(),
+        }
+    }
+
+    /// A window that rises at `rise_azimuth` and sets at `set_azimuth`, both at 10 degrees up.
+    fn pointed(
+        satellite: u32,
+        station: u16,
+        aos: i64,
+        los: i64,
+        rise_azimuth: u16,
+        set_azimuth: u16,
+    ) -> ContactWindow {
+        window(satellite, station, aos, los)
+            .with_pointing(at(rise_azimuth, 1_000), at(set_azimuth, 1_000))
+    }
+
+    /// 6 degrees per second in azimuth and 2.5 in elevation: a common amateur rotator.
+    fn rotator() -> SlewRates {
+        SlewRates::new(600, 250).unwrap()
     }
 
     /// Runs the scheduler and returns the decisions as `(reason, blocked_by)` pairs.
@@ -724,22 +920,16 @@ mod tests {
     fn overlapping_windows_at_one_station_conflict() {
         let a = window(1, 1, 0, 100);
         let b = window(2, 1, 99, 200);
-        assert_eq!(
-            conflict(&a, &b, Seconds::ZERO),
-            Some(Conflict::StationOverlap)
-        );
-        assert_eq!(
-            conflict(&b, &a, Seconds::ZERO),
-            Some(Conflict::StationOverlap)
-        );
+        assert_eq!(clash(&a, &b, Seconds::ZERO), Some(Conflict::StationOverlap));
+        assert_eq!(clash(&b, &a, Seconds::ZERO), Some(Conflict::StationOverlap));
     }
 
     #[test]
     fn back_to_back_windows_at_one_station_do_not_conflict_without_turnaround() {
         let a = window(1, 1, 0, 100);
         let b = window(2, 1, 100, 200);
-        assert_eq!(conflict(&a, &b, Seconds::ZERO), None);
-        assert_eq!(conflict(&b, &a, Seconds::ZERO), None);
+        assert_eq!(clash(&a, &b, Seconds::ZERO), None);
+        assert_eq!(clash(&b, &a, Seconds::ZERO), None);
     }
 
     #[test]
@@ -749,13 +939,10 @@ mod tests {
         let gap_60 = window(2, 1, 160, 300);
         let turnaround = Seconds::new(60);
         for (x, y) in [(&a, &gap_59), (&gap_59, &a)] {
-            assert_eq!(
-                conflict(x, y, turnaround),
-                Some(Conflict::StationTurnaround)
-            );
+            assert_eq!(clash(x, y, turnaround), Some(Conflict::StationTurnaround));
         }
         for (x, y) in [(&a, &gap_60), (&gap_60, &a)] {
-            assert_eq!(conflict(x, y, turnaround), None);
+            assert_eq!(clash(x, y, turnaround), None);
         }
     }
 
@@ -763,7 +950,7 @@ mod tests {
     fn turnaround_does_not_apply_between_different_stations() {
         let a = window(1, 1, 0, 100);
         let b = window(2, 2, 100, 200);
-        assert_eq!(conflict(&a, &b, Seconds::MAX), None);
+        assert_eq!(clash(&a, &b, Seconds::MAX), None);
     }
 
     #[test]
@@ -771,19 +958,19 @@ mod tests {
         let a = window(7, 1, 0, 100);
         let b = window(7, 2, 50, 150);
         assert_eq!(
-            conflict(&a, &b, Seconds::ZERO),
+            clash(&a, &b, Seconds::ZERO),
             Some(Conflict::SatelliteOverlap)
         );
         // Back to back at different stations is a handover, not a conflict.
         let handover = window(7, 2, 100, 200);
-        assert_eq!(conflict(&a, &handover, Seconds::ZERO), None);
+        assert_eq!(clash(&a, &handover, Seconds::ZERO), None);
     }
 
     #[test]
     fn different_satellites_at_different_stations_never_conflict() {
         let a = window(1, 1, 0, 100);
         let b = window(2, 2, 0, 100);
-        assert_eq!(conflict(&a, &b, Seconds::MAX), None);
+        assert_eq!(clash(&a, &b, Seconds::MAX), None);
     }
 
     #[test]
@@ -792,8 +979,8 @@ mod tests {
         // "no conflict", even with the longest possible turnaround.
         let a = window(1, 1, 0, 100);
         let far = window(2, 1, 10_000_000_000, 10_000_000_100);
-        assert_eq!(conflict(&a, &far, Seconds::MAX), None);
-        assert_eq!(conflict(&far, &a, Seconds::MAX), None);
+        assert_eq!(clash(&a, &far, Seconds::MAX), None);
+        assert_eq!(clash(&far, &a, Seconds::MAX), None);
     }
 
     #[test]
@@ -810,10 +997,202 @@ mod tests {
         for turnaround in [Seconds::ZERO, Seconds::new(45)] {
             for a in &windows {
                 for b in &windows {
-                    assert_eq!(conflict(a, b, turnaround), conflict(b, a, turnaround));
+                    assert_eq!(clash(a, b, turnaround), clash(b, a, turnaround));
                 }
             }
         }
+    }
+
+    // --- Slew time -----------------------------------------------------------------------------
+
+    #[test]
+    fn slew_rates_must_be_above_zero_on_both_axes() {
+        assert!(SlewRates::new(1, 1).is_some());
+        assert!(SlewRates::new(0, 250).is_none());
+        assert!(SlewRates::new(600, 0).is_none());
+        let rates = rotator();
+        assert_eq!(rates.azimuth_centidegrees_per_second(), 600);
+        assert_eq!(rates.elevation_centidegrees_per_second(), 250);
+    }
+
+    #[test]
+    fn slew_time_rounds_up_to_whole_seconds() {
+        let rates = rotator(); // 6 deg/s in azimuth
+        let turn = |degrees_x100: u16| rates.slew_time(at(0, 1_000), at(degrees_x100, 1_000));
+        assert_eq!(turn(0), Seconds::ZERO);
+        assert_eq!(turn(1), Seconds::new(1)); // any turn at all takes a second
+        assert_eq!(turn(600), Seconds::new(1)); // exactly one second's worth
+        assert_eq!(turn(601), Seconds::new(2));
+        assert_eq!(turn(9_000), Seconds::new(15)); // 90 degrees
+        assert_eq!(turn(18_000), Seconds::new(30)); // half a turn, the most there can be
+    }
+
+    #[test]
+    fn slew_time_goes_the_short_way_round_in_azimuth() {
+        let rates = rotator();
+        // 350 to 10 degrees is 20 degrees through north: 4 s at 6 deg/s (3.33 rounded up).
+        assert_eq!(
+            rates.slew_time(at(35_000, 1_000), at(1_000, 1_000)),
+            Seconds::new(4)
+        );
+        // 270 degrees apart on the dial is 90 the short way.
+        assert_eq!(
+            rates.slew_time(at(0, 1_000), at(27_000, 1_000)),
+            Seconds::new(15)
+        );
+    }
+
+    #[test]
+    fn slew_time_is_that_of_the_slower_axis() {
+        let rates = rotator(); // 6 deg/s azimuth, 2.5 deg/s elevation
+        // 30 degrees of azimuth (5 s) and 50 degrees of elevation (20 s): elevation decides.
+        assert_eq!(
+            rates.slew_time(at(0, 1_000), at(3_000, 6_000)),
+            Seconds::new(20)
+        );
+        // 120 degrees of azimuth (20 s) and 10 degrees of elevation (4 s): azimuth decides.
+        assert_eq!(
+            rates.slew_time(at(0, 1_000), at(12_000, 2_000)),
+            Seconds::new(20)
+        );
+        // The same going the other way.
+        assert_eq!(
+            rates.slew_time(at(12_000, 2_000), at(0, 1_000)),
+            Seconds::new(20)
+        );
+    }
+
+    #[test]
+    fn the_slowest_mount_and_the_longest_turn_do_not_overflow() {
+        let crawl = SlewRates::new(1, 1).unwrap(); // 0.01 deg/s
+        assert_eq!(
+            crawl.slew_time(at(0, 0), at(18_000, 9_000)),
+            Seconds::new(18_000)
+        );
+        let fast = SlewRates::new(u16::MAX, u16::MAX).unwrap();
+        assert_eq!(fast.slew_time(at(0, 0), at(18_000, 9_000)), Seconds::new(1));
+    }
+
+    #[test]
+    fn seconds_to_turn_treats_a_zero_rate_as_never_arriving() {
+        // `SlewRates::new` refuses a zero rate, so this cannot be reached through the public
+        // interface. The helper must still not divide by zero.
+        assert_eq!(seconds_to_turn(100, 0), u32::MAX);
+        assert_eq!(seconds_to_turn(0, 5), 0);
+        assert_eq!(seconds_to_turn(u16::MAX, u16::MAX), 1);
+    }
+
+    #[test]
+    fn a_rule_without_slew_rates_needs_only_its_fixed_turnaround() {
+        let earlier = pointed(1, 1, 0, 600, 0, 9_000);
+        let later = pointed(2, 1, 700, 900, 27_000, 0);
+        let fixed = rule(1, 45);
+        assert_eq!(fixed.slew_rates(), None);
+        assert_eq!(fixed.slew_time(&earlier, &later), Seconds::ZERO);
+        assert_eq!(fixed.gap_needed(&earlier, &later), Seconds::new(45));
+        assert_eq!(
+            StationRule::none(StationId::new(1)).gap_needed(&earlier, &later),
+            Seconds::ZERO
+        );
+    }
+
+    #[test]
+    fn a_rule_with_slew_rates_adds_the_turn_between_the_two_passes() {
+        // The first pass sets due east (90 degrees); the next rises due west (270 degrees).
+        // That is half a turn: 30 s at 6 deg/s, on top of 45 s fixed.
+        let earlier = pointed(1, 1, 0, 600, 0, 9_000);
+        let later = pointed(2, 1, 700, 900, 27_000, 0);
+        let slewing = rule(1, 45).with_slew_rates(rotator());
+        assert_eq!(slewing.slew_rates(), Some(rotator()));
+        assert_eq!(slewing.slew_time(&earlier, &later), Seconds::new(30));
+        assert_eq!(slewing.gap_needed(&earlier, &later), Seconds::new(75));
+    }
+
+    #[test]
+    fn the_turn_is_measured_from_where_the_first_pass_ends_to_where_the_second_begins() {
+        // Direction matters. Pass A rises north and sets east; pass B rises south and sets west.
+        let a = pointed(1, 1, 0, 600, 0, 9_000);
+        let b = pointed(2, 1, 700, 900, 18_000, 27_000);
+        let slewing = rule(1, 0).with_slew_rates(rotator());
+        // A then B: east (90) to south (180) is 90 degrees, 15 s.
+        assert_eq!(slewing.slew_time(&a, &b), Seconds::new(15));
+        // B then A: west (270) to north (0) is 90 degrees too, but from different ends.
+        assert_eq!(slewing.slew_time(&b, &a), Seconds::new(15));
+        // Change where A sets and only the A-then-B turn changes.
+        let a_sets_south = pointed(1, 1, 0, 600, 0, 18_000);
+        assert_eq!(slewing.slew_time(&a_sets_south, &b), Seconds::ZERO);
+        assert_eq!(slewing.slew_time(&b, &a_sets_south), Seconds::new(15));
+    }
+
+    #[test]
+    fn slew_time_needs_pointing_on_both_windows() {
+        let slewing = rule(1, 20).with_slew_rates(rotator());
+        let with = pointed(1, 1, 0, 600, 0, 9_000);
+        let without = window(2, 1, 700, 900);
+        assert_eq!(slewing.slew_time(&with, &without), Seconds::ZERO);
+        assert_eq!(slewing.slew_time(&without, &with), Seconds::ZERO);
+        // The fixed turnaround still applies.
+        assert_eq!(slewing.gap_needed(&with, &without), Seconds::new(20));
+    }
+
+    #[test]
+    fn gap_needed_saturates_instead_of_overflowing() {
+        let earlier = pointed(1, 1, 0, 600, 0, 9_000);
+        let later = pointed(2, 1, 700, 900, 27_000, 0);
+        let huge = StationRule::new(StationId::new(1), Seconds::MAX).with_slew_rates(rotator());
+        assert_eq!(huge.gap_needed(&earlier, &later), Seconds::MAX);
+    }
+
+    #[test]
+    fn a_long_turn_makes_a_conflict_out_of_a_gap_that_a_short_turn_fits_in() {
+        // Twenty seconds between the passes, no fixed turnaround, 6 deg/s.
+        let slewing = rule(1, 0).with_slew_rates(rotator());
+        let first = pointed(1, 1, 0, 600, 0, 9_000); // sets due east
+        let near = pointed(2, 1, 620, 900, 12_000, 0); // rises 30 degrees away: 5 s
+        let far = pointed(2, 1, 620, 900, 27_000, 0); // rises half a turn away: 30 s
+        assert_eq!(conflict(&first, &near, &slewing), None);
+        assert_eq!(
+            conflict(&first, &far, &slewing),
+            Some(Conflict::StationTurnaround)
+        );
+        // Symmetric in its arguments: the earlier window is found by time, not by position.
+        assert_eq!(
+            conflict(&far, &first, &slewing),
+            Some(Conflict::StationTurnaround)
+        );
+    }
+
+    #[test]
+    fn a_gap_exactly_as_long_as_the_turn_is_enough() {
+        let slewing = rule(1, 10).with_slew_rates(rotator());
+        let first = pointed(1, 1, 0, 600, 0, 9_000);
+        // Half a turn: 30 s of slew plus 10 s fixed is 40 s.
+        let just_enough = pointed(2, 1, 640, 900, 27_000, 0);
+        let one_short = pointed(2, 1, 639, 900, 27_000, 0);
+        assert_eq!(conflict(&first, &just_enough, &slewing), None);
+        assert_eq!(
+            conflict(&first, &one_short, &slewing),
+            Some(Conflict::StationTurnaround)
+        );
+    }
+
+    #[test]
+    fn slew_time_does_not_apply_between_stations() {
+        let slewing = rule(1, 0).with_slew_rates(SlewRates::new(1, 1).unwrap());
+        let a = pointed(1, 1, 0, 600, 0, 9_000);
+        let b = pointed(2, 2, 600, 900, 27_000, 0);
+        assert_eq!(conflict(&a, &b, &slewing), None);
+    }
+
+    #[test]
+    fn rule_for_finds_a_stations_rule_or_gives_one_that_needs_nothing() {
+        let rules = [rule(1, 30), rule(2, 60).with_slew_rates(rotator())];
+        assert_eq!(rule_for(&rules, StationId::new(2)), rules[1]);
+        assert_eq!(
+            rule_for(&rules, StationId::new(9)),
+            StationRule::none(StationId::new(9))
+        );
+        assert_eq!(rule_for(&[], StationId::new(1)).turnaround(), Seconds::ZERO);
     }
 
     // --- rank ----------------------------------------------------------------------------------
@@ -1089,6 +1468,43 @@ mod tests {
             run(&windows, &requests, &[rule(1, 60)]),
             [lost(ReasonCode::StationTurnaround, 1), OK]
         );
+    }
+
+    #[test]
+    fn the_scheduler_gives_the_antenna_time_to_turn_between_passes() {
+        // Three passes at one station, 20 s apart, no fixed turnaround. The second rises half a
+        // turn from where the first sets (30 s to get there); the third rises close to where
+        // the first sets (5 s).
+        let windows = [
+            pointed(1, 1, 0, 600, 0, 9_000),
+            pointed(2, 1, 620, 1_000, 27_000, 0),
+            pointed(3, 1, 620, 900, 12_000, 0),
+        ];
+        let requests = [request(1, 9), request(2, 5), request(3, 1)];
+
+        // Without slew rates the middle-priority pass follows the first; the third overlaps it.
+        assert_eq!(
+            run(&windows, &requests, &[rule(1, 0)]),
+            [OK, OK, lost(ReasonCode::StationBusy, 1)]
+        );
+        // With them, the antenna cannot reach the second pass in time, and the third, which it
+        // can reach, is scheduled instead.
+        assert_eq!(
+            run(
+                &windows,
+                &requests,
+                &[rule(1, 0).with_slew_rates(rotator())]
+            ),
+            [OK, lost(ReasonCode::StationTurnaround, 0), OK]
+        );
+    }
+
+    #[test]
+    fn windows_without_pointing_are_scheduled_on_the_fixed_turnaround_alone() {
+        let windows = [window(1, 1, 0, 600), window(2, 1, 620, 900)];
+        let requests = [request(1, 9), request(2, 1)];
+        let slewing = rule(1, 0).with_slew_rates(SlewRates::new(1, 1).unwrap());
+        assert_eq!(run(&windows, &requests, &[slewing]), [OK, OK]);
     }
 
     #[test]
@@ -1394,12 +1810,20 @@ mod tests {
             .map(|_| {
                 let aos = i64::try_from(rng.below(6_000)).unwrap();
                 let length = i64::try_from(30 + rng.below(600)).unwrap();
-                window(
+                let plain = window(
                     u32::try_from(1 + rng.below(satellites + 1)).unwrap(),
                     u16::try_from(1 + rng.below(stations)).unwrap(),
                     aos,
                     aos + length,
-                )
+                );
+                // Most windows record where the antenna points; a few do not.
+                if rng.below(5) == 0 {
+                    plain
+                } else {
+                    let mut direction = || u16::try_from(rng.below(36_000)).unwrap();
+                    let (rise, set) = (direction(), direction());
+                    plain.with_pointing(at(rise, 1_000), at(set, 1_000))
+                }
             })
             .collect();
         let requests = (1..=satellites)
@@ -1420,10 +1844,17 @@ mod tests {
         let mut rules = Vec::new();
         for station in 1..=stations {
             if rng.below(2) == 0 {
-                rules.push(rule(
+                let mut station_rule = rule(
                     u16::try_from(station).unwrap(),
                     u32::try_from(rng.below(120)).unwrap(),
-                ));
+                );
+                // Half the rules also have a slow mount: 1 to 4 degrees per second.
+                if rng.below(2) == 0 {
+                    let rate = u16::try_from(100 + rng.below(300)).unwrap();
+                    station_rule =
+                        station_rule.with_slew_rates(SlewRates::new(rate, rate).unwrap());
+                }
+                rules.push(station_rule);
             }
         }
         Instance {
@@ -1431,13 +1862,6 @@ mod tests {
             requests,
             rules,
         }
-    }
-
-    fn turnaround_at(rules: &[StationRule], station: StationId) -> Seconds {
-        rules
-            .iter()
-            .find(|r| r.station() == station)
-            .map_or(Seconds::ZERO, StationRule::turnaround)
     }
 
     fn granted(windows: &[ContactWindow], decisions: &[Decision], satellite: SatelliteId) -> u64 {
@@ -1468,7 +1892,7 @@ mod tests {
         for (i, a) in windows.iter().enumerate() {
             for (j, b) in windows.iter().enumerate().skip(i + 1) {
                 if decisions[i].is_scheduled() && decisions[j].is_scheduled() {
-                    let clash = conflict(a, b, turnaround_at(rules, a.station()));
+                    let clash = conflict(a, b, &rule_for(rules, a.station()));
                     assert_eq!(clash, None, "scheduled windows {i} and {j} conflict");
                 }
             }
@@ -1478,7 +1902,7 @@ mod tests {
         for (i, (w, decision)) in windows.iter().zip(decisions).enumerate() {
             let reason = decision.reason().expect("every window is decided");
             let request = requests.iter().find(|r| r.satellite() == w.satellite());
-            let turnaround = turnaround_at(rules, w.station());
+            let rule = rule_for(rules, w.station());
             let blocker = decision.blocked_by().map(|b| {
                 assert!(
                     decisions[b].is_scheduled(),
@@ -1503,7 +1927,7 @@ mod tests {
                 }
                 ReasonCode::StationBusy | ReasonCode::StationTieLost => {
                     let b = blocker.expect("a station conflict names its blocker");
-                    assert_eq!(conflict(w, b, turnaround), Some(Conflict::StationOverlap));
+                    assert_eq!(conflict(w, b, &rule), Some(Conflict::StationOverlap));
                     let (mine, theirs) = (priority_of(w).unwrap(), priority_of(b).unwrap());
                     if reason == ReasonCode::StationBusy {
                         assert!(
@@ -1517,14 +1941,11 @@ mod tests {
                 }
                 ReasonCode::StationTurnaround => {
                     let b = blocker.expect("a turnaround conflict names its blocker");
-                    assert_eq!(
-                        conflict(w, b, turnaround),
-                        Some(Conflict::StationTurnaround)
-                    );
+                    assert_eq!(conflict(w, b, &rule), Some(Conflict::StationTurnaround));
                 }
                 ReasonCode::SatelliteBusy => {
                     let b = blocker.expect("a satellite conflict names its blocker");
-                    assert_eq!(conflict(w, b, turnaround), Some(Conflict::SatelliteOverlap));
+                    assert_eq!(conflict(w, b, &rule), Some(Conflict::SatelliteOverlap));
                 }
                 ReasonCode::Scheduled => {
                     assert!(blocker.is_none());

@@ -7,10 +7,10 @@
 //! Offline and deterministic: the satellites are synthetic element sets with a fixed epoch.
 
 use chrono::Duration;
-use maat_ground::flight::{Priority, SatelliteRequest, Seconds, StationId};
+use maat_ground::flight::{Priority, ReasonCode, SatelliteRequest, Seconds, StationId};
 use maat_ground::{
-    GroundStation, Scheduler, SlewLimits, StationSite, contact_windows, plan_contacts,
-    satellites_from_omm,
+    GroundStation, PlanOptions, Scheduler, SlewLimits, StationSite, contact_windows, plan_contacts,
+    plan_contacts_with, satellites_from_omm, time_until_first_pass,
 };
 
 /// Five synthetic satellites as OMM JSON. B, C and D share an orbit, so they compete for every
@@ -88,7 +88,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nGREEDY AGAINST OPTIMAL, ONE WEEK");
     let week = contact_windows(&satellites, &stations, start, start + Duration::days(7))?;
     let greedy = plan_contacts(&week, &satellites, &stations, &requests, Scheduler::Greedy)?;
-    let optimal = plan_contacts(&week, &satellites, &stations, &requests, Scheduler::Optimal)?;
+
+    // The optimal scheduler searches until it has proved its plan is the best, or until a time
+    // limit. A plan is needed before its first pass, so that is the longest limit that makes
+    // sense. Here the planning is done an hour ahead and capped at ten seconds.
+    let now = start - Duration::hours(1);
+    let limit = time_until_first_pass(&week, now)
+        .unwrap_or_default()
+        .min(std::time::Duration::from_secs(10));
+    let options = PlanOptions::new(Scheduler::Optimal).with_optimal_time_limit(limit);
+    let optimal = plan_contacts_with(&week, &satellites, &stations, &requests, &options)?;
     for plan in [&greedy, &optimal] {
         println!(
             "  {:<8} {:>3} of {} passes scheduled, {:>6} s of contact, value {}",
@@ -103,5 +112,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "  The optimal plan is worth {:.1} % more.",
         100.0 * (optimal.value - greedy.value) / greedy.value
     );
+    if let Some(optimality) = optimal.optimality {
+        println!(
+            "  It is {} (time limit {} s).",
+            if optimality.proven {
+                "proven: no plan is worth more"
+            } else {
+                "the best found before the time limit, not proven"
+            },
+            optimality.time_limit.as_secs()
+        );
+    }
+
+    // The optimal plan is better in total, but it can take contact from one satellite to give
+    // to another. A floor stops that: no satellite gets less than the greedy plan gives it.
+    let floored = plan_contacts_with(
+        &week,
+        &satellites,
+        &stations,
+        &requests,
+        &options.with_satellite_floor(true),
+    )?;
+    println!("\nCONTACT PER SATELLITE, ONE WEEK (seconds)");
+    println!(
+        "  {:<10} {:>8} {:>8} {:>18}",
+        "", "greedy", "optimal", "optimal with floor"
+    );
+    for ((g, o), f) in greedy
+        .satellites
+        .iter()
+        .zip(&optimal.satellites)
+        .zip(&floored.satellites)
+    {
+        if g.request.is_some() {
+            println!(
+                "  {:<10} {:>8} {:>8} {:>18}",
+                g.name,
+                g.contact_scheduled.get(),
+                o.contact_scheduled.get(),
+                f.contact_scheduled.get()
+            );
+        }
+    }
+    println!(
+        "  {:<10} {:>8} {:>8} {:>18}",
+        "value", greedy.value, optimal.value, floored.value
+    );
+    println!(
+        "  With the floor the optimal plan is worth {:.1} % more than greedy.",
+        100.0 * (floored.value - greedy.value) / greedy.value
+    );
+
+    // Seattle's antenna turns at 2 degrees per second, so between two passes it needs its
+    // fixed 120 s and the time to turn from where one sets to where the next rises.
+    println!("\nA PASS LOST TO ANTENNA TURNING TIME");
+    // Look for a pass that clears the fixed 120 s and is still too close.
+    let lost_to_slew = greedy.entries.iter().find(|entry| {
+        let Some(blocker) = entry.blocked_by.map(|index| &greedy.entries[index]) else {
+            return false;
+        };
+        let gap = (entry.aos - blocker.los).max(blocker.aos - entry.los);
+        entry.reason == ReasonCode::StationTurnaround && gap >= Duration::seconds(120)
+    });
+    match lost_to_slew {
+        Some(entry) => println!(
+            "  {} over {}, {}\n  {}",
+            entry.satellite_name,
+            entry.station_name,
+            entry.aos.format("%Y-%m-%d %H:%M:%S"),
+            entry.explanation()
+        ),
+        None => println!("  (none this week)"),
+    }
     Ok(())
 }

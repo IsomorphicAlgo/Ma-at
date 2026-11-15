@@ -1,8 +1,8 @@
 //! Shared helpers for this crate's unit tests: hand-built windows and random scheduling problems.
 
 use maat_flight::{
-    ContactWindow, Elevation, Priority, SatelliteId, SatelliteRequest, Seconds, StationId,
-    StationRule, Timestamp,
+    Azimuth, ContactWindow, Elevation, Pointing, Priority, SatelliteId, SatelliteRequest, Seconds,
+    SlewRates, StationId, StationRule, Timestamp,
 };
 
 /// A contact window from plain numbers. Times are seconds from an arbitrary zero.
@@ -15,6 +15,27 @@ pub(crate) fn window(satellite: u32, station: u16, aos: i64, los: i64) -> Contac
         Elevation::ZENITH,
     )
     .expect("test windows are valid")
+}
+
+/// A pointing from hundredths of a degree.
+pub(crate) fn at(azimuth: u16, elevation: u16) -> Pointing {
+    Pointing {
+        azimuth: Azimuth::from_centidegrees(azimuth).expect("test azimuths are valid"),
+        elevation: Elevation::from_centidegrees(elevation).expect("test elevations are valid"),
+    }
+}
+
+/// A window that rises at `rise_azimuth` and sets at `set_azimuth`, both at 10 degrees up.
+pub(crate) fn pointed(
+    satellite: u32,
+    station: u16,
+    aos: i64,
+    los: i64,
+    rise_azimuth: u16,
+    set_azimuth: u16,
+) -> ContactWindow {
+    window(satellite, station, aos, los)
+        .with_pointing(at(rise_azimuth, 1_000), at(set_azimuth, 1_000))
 }
 
 pub(crate) fn request(satellite: u32, priority: u8) -> SatelliteRequest {
@@ -51,7 +72,9 @@ pub(crate) struct Instance {
 }
 
 /// A crowded random problem with `count` windows: few stations and a short horizon, so that
-/// conflicts, ties, unmet minimums and met needs all come up. One satellite has no request.
+/// conflicts, ties, unmet minimums and met needs all come up. One satellite has no request. Most
+/// windows record their pointing and some stations have slew rates, so the time an antenna
+/// needs to turn between passes is exercised too.
 pub(crate) fn random_instance(rng: &mut Lcg, count: u64) -> Instance {
     let satellites = 2 + rng.below(5);
     let stations = 1 + rng.below(3);
@@ -61,12 +84,20 @@ pub(crate) fn random_instance(rng: &mut Lcg, count: u64) -> Instance {
         .map(|_| {
             let aos = i64::try_from(rng.below(horizon)).unwrap();
             let length = i64::try_from(30 + rng.below(600)).unwrap();
-            window(
+            let plain = window(
                 u32::try_from(1 + rng.below(satellites + 1)).unwrap(),
                 u16::try_from(1 + rng.below(stations)).unwrap(),
                 aos,
                 aos + length,
-            )
+            );
+            // Most windows record where the antenna points; a few do not.
+            if rng.below(5) == 0 {
+                plain
+            } else {
+                let mut direction = || u16::try_from(rng.below(36_000)).unwrap();
+                let (rise, set) = (direction(), direction());
+                plain.with_pointing(at(rise, 1_000), at(set, 1_000))
+            }
         })
         .collect();
     let mut requests = Vec::new();
@@ -86,10 +117,16 @@ pub(crate) fn random_instance(rng: &mut Lcg, count: u64) -> Instance {
     let mut rules = Vec::new();
     for station in 1..=stations {
         if rng.below(2) == 0 {
-            rules.push(rule(
+            let mut station_rule = rule(
                 u16::try_from(station).unwrap(),
                 u32::try_from(rng.below(120)).unwrap(),
-            ));
+            );
+            // Half the rules also have a slow mount: 1 to 4 degrees per second.
+            if rng.below(2) == 0 {
+                let rate = u16::try_from(100 + rng.below(300)).unwrap();
+                station_rule = station_rule.with_slew_rates(SlewRates::new(rate, rate).unwrap());
+            }
+            rules.push(station_rule);
         }
     }
     Instance {

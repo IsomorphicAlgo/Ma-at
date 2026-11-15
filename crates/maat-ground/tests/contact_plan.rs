@@ -7,14 +7,15 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use ephemerust::Omm;
-use maat_ground::flight::schedule::{conflict, schedule_greedy};
+use maat_ground::flight::schedule::{conflict, rule_for, schedule_greedy};
 use maat_ground::flight::{
     ContactWindow, Decision, Priority, ReasonClass, ReasonCode, SatelliteId, SatelliteRequest,
     Seconds, StationId, StationRule,
 };
 use maat_ground::{
-    ContactPlan, DecidedBy, GroundStation, JSON_SCHEMA, Satellite, Scheduler, SlewLimits,
-    StationSite, WindowSurvey, contact_windows, plan_contacts, satellites_from_omm,
+    ContactPlan, DecidedBy, GroundStation, JSON_SCHEMA, PlanOptions, Satellite, Scheduler,
+    SlewLimits, StationSite, WindowSurvey, contact_windows, plan_contacts, plan_contacts_with,
+    satellites_from_omm,
 };
 
 const CATALOG: &str = r#"[
@@ -126,11 +127,8 @@ fn rules() -> Vec<StationRule> {
     stations().iter().map(GroundStation::rule).collect()
 }
 
-fn turnaround_of(station: StationId) -> Seconds {
-    rules()
-        .iter()
-        .find(|rule| rule.station() == station)
-        .map_or(Seconds::ZERO, StationRule::turnaround)
+fn rule_of(station: StationId) -> StationRule {
+    rule_for(&rules(), station)
 }
 
 fn scheduled_windows(plan: &ContactPlan) -> Vec<ContactWindow> {
@@ -283,7 +281,7 @@ fn no_two_scheduled_passes_conflict() {
         assert!(windows.len() > 100);
         for (i, a) in windows.iter().enumerate() {
             for b in &windows[i + 1..] {
-                let clash = conflict(a, b, turnaround_of(a.station()));
+                let clash = conflict(a, b, &rule_of(a.station()));
                 assert_eq!(clash, None, "{} plan: {a:?} and {b:?}", scheduler.name());
             }
         }
@@ -308,6 +306,128 @@ fn stations_with_a_turnaround_time_get_it_between_passes() {
                     "station {station}: only {gap} s between passes"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn a_station_with_slew_limits_also_gets_time_to_turn_its_antenna() {
+    // Seattle turns at 2 degrees per second. Between two passes it needs its 120 s and, on top,
+    // the time to turn from where the first sets to where the second rises. This recomputes
+    // that from the windows' recorded pointing, without the scheduler's own conflict check.
+    let seattle = rule_of(SEATTLE);
+    let rates = seattle.slew_rates().expect("Seattle has slew limits");
+    assert_eq!(rates.azimuth_centidegrees_per_second(), 200);
+
+    for scheduler in [Scheduler::Greedy, Scheduler::Optimal] {
+        let mut windows: Vec<ContactWindow> = scheduled_windows(&plan(scheduler))
+            .into_iter()
+            .filter(|w| w.station() == SEATTLE)
+            .collect();
+        windows.sort_by_key(ContactWindow::aos);
+        assert!(windows.len() > 5);
+
+        for pair in windows.windows(2) {
+            let from = pair[0]
+                .los_pointing()
+                .expect("surveyed windows record pointing");
+            let to = pair[1]
+                .aos_pointing()
+                .expect("surveyed windows record pointing");
+            // Both ends of a pass are at the 10 degree mask, so the turn is all azimuth.
+            let turn_centidegrees = from.azimuth.separation(to.azimuth);
+            let slew = u32::from(turn_centidegrees).div_ceil(200);
+            let needed = 120 + slew;
+            let gap = pair[0].los().seconds_until(pair[1].aos()).unwrap().get();
+            assert!(
+                gap >= needed,
+                "{}: {gap} s between passes, {needed} s needed",
+                scheduler.name()
+            );
+            assert_eq!(seattle.gap_needed(&pair[0], &pair[1]).get(), needed);
+        }
+    }
+}
+
+#[test]
+fn surveyed_windows_record_where_the_antenna_points_at_each_end() {
+    let survey = survey();
+    for window in &survey.windows {
+        let (aos, los) = (
+            window.aos_pointing().expect("AOS pointing"),
+            window.los_pointing().expect("LOS pointing"),
+        );
+        // Every station's mask is 10 degrees. The window is rounded inward by up to a second
+        // at each end, so the satellite is at or just above the mask there, and never far
+        // above it: a low-orbit pass climbs well under 0.5 degrees in a second near the mask.
+        for end in [aos, los] {
+            let elevation = end.elevation.centidegrees();
+            assert!(
+                (1_000..1_050).contains(&elevation),
+                "elevation {elevation} at an end of {window:?}"
+            );
+        }
+        assert!(aos.elevation <= window.max_elevation());
+    }
+}
+
+#[test]
+fn with_a_floor_no_satellite_loses_contact_to_the_optimizer() {
+    // The week that prompted the floor: without one, the optimal plan is worth more in total
+    // but EXAMPLE-B, which shares its priority and its orbit with EXAMPLE-C, loses about half
+    // of what the greedy plan gives it.
+    let useful = |plan: &ContactPlan, satellite: SatelliteId| {
+        let summary = plan
+            .satellites
+            .iter()
+            .find(|s| s.satellite == satellite)
+            .unwrap();
+        let granted = summary.contact_scheduled.get();
+        match summary.request {
+            Some(request) if !request.is_unlimited() => granted.min(request.need().get()),
+            _ => granted,
+        }
+    };
+    let greedy = plan(Scheduler::Greedy);
+    let free = plan(Scheduler::Optimal);
+    let floored = plan_contacts_with(
+        &survey(),
+        &satellites(),
+        &stations(),
+        &requests(),
+        &PlanOptions::new(Scheduler::Optimal).with_satellite_floor(true),
+    )
+    .expect("planning succeeds");
+
+    // The premise: without a floor B really does lose a great deal.
+    assert!(
+        useful(&free, B) * 10 < useful(&greedy, B) * 7,
+        "B should lose over 30 %"
+    );
+
+    // With one, nobody loses anything.
+    for satellite in [A, B, C, D] {
+        assert!(
+            useful(&floored, satellite) >= useful(&greedy, satellite),
+            "satellite {satellite}: {} s with a floor, {} s under greedy",
+            useful(&floored, satellite),
+            useful(&greedy, satellite)
+        );
+        let summary = floored
+            .satellites
+            .iter()
+            .find(|s| s.satellite == satellite)
+            .unwrap();
+        assert_eq!(summary.floor.unwrap().get(), useful(&greedy, satellite));
+    }
+    assert!(floored.optimality.unwrap().proven);
+    assert!(greedy.value <= floored.value && floored.value <= free.value);
+
+    // And the plan still obeys every rule.
+    let windows = scheduled_windows(&floored);
+    for (i, a) in windows.iter().enumerate() {
+        for b in &windows[i + 1..] {
+            assert_eq!(conflict(a, b, &rule_of(a.station())), None);
         }
     }
 }
@@ -372,7 +492,7 @@ fn blocked_by_always_points_at_a_scheduled_pass_that_conflicts() {
             let clash = conflict(
                 &entry.window.unwrap(),
                 &other.window.unwrap(),
-                turnaround_of(entry.station),
+                &rule_of(entry.station),
             );
             assert!(
                 clash.is_some(),

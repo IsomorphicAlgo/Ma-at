@@ -1,0 +1,70 @@
+# Example station and request file for `maat plan`.
+#
+#   maat plan --catalog examples/catalog.json --stations examples/stations.toml \
+#             --start 2026-08-01T12:00:00Z --hours 6
+#
+# The satellites in catalog.json are synthetic: invented element sets, not real objects.
+# The SatNOGS numbers below are placeholders, not real stations or transmitters.
+#
+# Station keys: id, name, latitude_deg (north positive), longitude_deg (east positive,
+# -180 to 180), altitude_m (optional), minimum_elevation_deg, turnaround_s (optional),
+# slew_azimuth_deg_per_s and slew_elevation_deg_per_s (optional, both or neither),
+# satnogs_id (optional).
+#
+# Request keys: satellite (catalog number), priority (0 to 255, higher wins),
+# min_contact_s (optional), need_s (optional), satnogs_transmitter (optional).
+
+[[station]]
+id = 1
+name = "Seattle"
+latitude_deg = 47.61
+longitude_deg = -122.33
+minimum_elevation_deg = 10.0
+turnaround_s = 120
+slew_azimuth_deg_per_s = 2.0
+slew_elevation_deg_per_s = 2.0
+
+[[station]]
+id = 2
+name = "Quito"
+latitude_deg = -0.18
+longitude_deg = -78.47
+minimum_elevation_deg = 10.0
+satnogs_id = 17
+
+[[station]]
+id = 3
+name = "Svalbard"
+latitude_deg = 78.23
+longitude_deg = 15.41
+minimum_elevation_deg = 10.0
+turnaround_s = 60
+
+[[station]]
+id = 4
+name = "Cape Town"
+latitude_deg = -33.92
+longitude_deg = 18.42
+minimum_elevation_deg = 10.0
+satnogs_id = 2433
+
+[[request]]
+satellite = 65001
+priority = 9
+need_s = 1200
+satnogs_transmitter = "AAAAAAAAAAAAAAAAAAAAA1"
+
+[[request]]
+satellite = 100123
+priority = 4
+min_contact_s = 180
+satnogs_transmitter = "BBBBBBBBBBBBBBBBBBBBB2"
+
+[[request]]
+satellite = 100124
+priority = 4
+min_contact_s = 180
+
+[[request]]
+satellite = 100125
+priority = 2

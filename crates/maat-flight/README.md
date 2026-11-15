@@ -11,9 +11,11 @@ The vehicle layer of the [Ma'at](https://github.com/IsomorphicAlgo/Ma-at) contac
 It holds:
 
 - the types a scheduler works on: `ContactWindow`, `SatelliteId`, `StationId`, `Priority`,
-  `Timestamp`;
+  `Timestamp`, and the `Pointing` of the antenna at each end of a window;
 - a **greedy scheduler**, `schedule_greedy`: best window first, one `Decision` per window written
-  into a slice you provide, with a run time that depends only on how many windows there are;
+  into a slice you provide, with a run time that depends only on how many windows there are.
+  Between two passes a station is given its fixed turnaround time plus, if it has `SlewRates`,
+  the time to turn its antenna from the end of one to the start of the next;
 - the stable `MAAT-xxx` **reason codes** that explain every decision.
 
 ```rust

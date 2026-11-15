@@ -13,12 +13,13 @@
 //! ([`ContactPlan::to_json`]).
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use maat_flight::schedule::{Conflict, conflict, rank, schedule_greedy, turnaround_for};
+use maat_flight::schedule::{Conflict, conflict, rank, rule_for, schedule_greedy};
 use maat_flight::{
-    ContactWindow, Decision, Priority, ReasonCode, SatelliteId, SatelliteRequest, Seconds,
-    StationId, StationRule,
+    ContactWindow, Decision, Pointing, Priority, ReasonCode, SatelliteId, SatelliteRequest,
+    Seconds, SlewRates, StationId, StationRule,
 };
 use serde_json::{Value, json};
 
@@ -36,8 +37,9 @@ pub enum Scheduler {
     /// Best window first, never reconsidered. Small, predictable and bounded; the same code runs
     /// onboard. Priority is a strict rank. See [`maat_flight::schedule`].
     Greedy,
-    /// The plan of greatest total value, found by integer programming. Ground only, and with no
-    /// bound on run time. Priority is a weight.
+    /// The plan of greatest total value, found by integer programming. Ground only. Priority is
+    /// a weight. The search starts from the greedy plan and stops at a time limit, so the result
+    /// is never worth less than the greedy plan, and says whether it is proven best.
     Optimal,
 }
 
@@ -50,6 +52,139 @@ impl Scheduler {
             Self::Optimal => "optimal",
         }
     }
+}
+
+/// How long the optimal scheduler searches when no limit is given: one minute.
+///
+/// Problems of a few thousand windows finish in well under a second, so this is reached only by
+/// a problem that is unusually hard. When it is reached, the plan is the best found so far.
+pub const DEFAULT_OPTIMAL_TIME_LIMIT: Duration = Duration::from_secs(60);
+
+/// How a plan should be built.
+///
+/// ```
+/// use std::time::Duration;
+/// use maat_ground::{PlanOptions, Scheduler};
+///
+/// let options = PlanOptions::new(Scheduler::Optimal)
+///     .with_optimal_time_limit(Duration::from_secs(5));
+/// assert_eq!(options.optimal_time_limit, Duration::from_secs(5));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PlanOptions {
+    /// Which scheduler builds the plan.
+    pub scheduler: Scheduler,
+    /// How long the optimal scheduler may search. Ignored by the greedy scheduler, whose run
+    /// time is bounded by the size of the problem.
+    pub optimal_time_limit: Duration,
+    /// Whether the optimal scheduler must give every satellite at least the useful contact the
+    /// greedy plan gives it. Off by default. Ignored by the greedy scheduler.
+    pub satellite_floor: bool,
+}
+
+impl PlanOptions {
+    /// Options for the given scheduler, with [`DEFAULT_OPTIMAL_TIME_LIMIT`].
+    #[must_use]
+    pub fn new(scheduler: Scheduler) -> Self {
+        Self {
+            scheduler,
+            optimal_time_limit: DEFAULT_OPTIMAL_TIME_LIMIT,
+            satellite_floor: false,
+        }
+    }
+
+    /// Sets whether the optimal scheduler keeps a floor under every satellite.
+    ///
+    /// Without a floor the optimal plan is worth at least as much as the greedy plan **in
+    /// total**, but a satellite can get less than the greedy plan would give it: the solver
+    /// moves contact to wherever it adds most, and between two satellites of equal priority it
+    /// has no preference. With a floor, no satellite gets less useful contact (contact up to
+    /// its need) than under the greedy plan, and the optimal plan improves on it only where
+    /// nobody pays. The total gain is smaller or the same.
+    ///
+    /// ```
+    /// use maat_ground::{PlanOptions, Scheduler};
+    ///
+    /// let options = PlanOptions::new(Scheduler::Optimal).with_satellite_floor(true);
+    /// assert!(options.satellite_floor);
+    /// ```
+    #[must_use]
+    pub fn with_satellite_floor(mut self, floor: bool) -> Self {
+        self.satellite_floor = floor;
+        self
+    }
+
+    /// Sets how long the optimal scheduler may search.
+    ///
+    /// The right limit is how long you can wait for the plan. A plan is needed before its first
+    /// pass begins, so [`time_until_first_pass`] gives the longest limit that makes sense.
+    #[must_use]
+    pub fn with_optimal_time_limit(mut self, limit: Duration) -> Self {
+        self.optimal_time_limit = limit;
+        self
+    }
+}
+
+/// How long there is from `now` until the first surveyed window begins.
+///
+/// A plan is of no use for a pass that has already started, so this is the longest the optimal
+/// scheduler can usefully be given. `None` if the survey found no windows, or if the first one
+/// has already begun.
+///
+/// ```
+/// use chrono::Duration;
+/// use maat_ground::flight::StationId;
+/// use maat_ground::{
+///     GroundStation, PlanOptions, Scheduler, StationSite, contact_windows, satellites_from_omm,
+///     time_until_first_pass,
+/// };
+///
+/// let satellites = satellites_from_omm(
+///     r#"{"OBJECT_NAME":"EXAMPLE-A","NORAD_CAT_ID":65001,"EPOCH":"2026-08-01T12:00:00",
+///         "MEAN_MOTION":15.49,"ECCENTRICITY":0.0002,"INCLINATION":51.64,"RA_OF_ASC_NODE":221.0,
+///         "ARG_OF_PERICENTER":89.0,"MEAN_ANOMALY":280.0,"BSTAR":0.00003}"#,
+/// )?;
+/// let stations = [GroundStation::new(
+///     StationId::new(1),
+///     "Seattle",
+///     StationSite { latitude_deg: 47.61, longitude_deg: -122.33, altitude_m: 0.0 },
+///     10.0,
+/// )?];
+/// let start = satellites[0].epoch();
+/// let survey = contact_windows(&satellites, &stations, start, start + Duration::days(1))?;
+///
+/// // Planning an hour before the search window opens: the plan must be ready before the first
+/// // pass, and the optimal scheduler is told to stop a minute before that at the latest.
+/// let now = start - Duration::hours(1);
+/// let available = time_until_first_pass(&survey, now).expect("there are passes ahead");
+/// let limit = available.saturating_sub(std::time::Duration::from_secs(60));
+/// let options = PlanOptions::new(Scheduler::Optimal).with_optimal_time_limit(limit);
+/// assert!(options.optimal_time_limit >= std::time::Duration::from_secs(59 * 60));
+/// # Ok::<(), maat_ground::GroundError>(())
+/// ```
+#[must_use]
+pub fn time_until_first_pass(survey: &WindowSurvey, now: DateTime<Utc>) -> Option<Duration> {
+    let first = survey.windows.iter().map(ContactWindow::aos).min()?;
+    let first = utc_from_timestamp(first).ok()?;
+    // `to_std` fails for a negative duration, which is a first pass already under way.
+    (first - now).to_std().ok().filter(|wait| !wait.is_zero())
+}
+
+/// Whether an optimal plan is proven to be the best, and the limit it was searched under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Optimality {
+    /// `true` if the solver proved that no plan is worth more. `false` if it reached its time
+    /// limit first: the plan is then the best it had found, and worth at least as much as the
+    /// greedy plan.
+    pub proven: bool,
+    /// The time limit the solver was given.
+    pub time_limit: Duration,
+    /// `true` if the plan was built with a floor under every satellite
+    /// ([`PlanOptions::with_satellite_floor`]). "Proven" then means that no plan respecting the
+    /// floor is worth more.
+    pub satellite_floor: bool,
 }
 
 /// Which stage decided a pass.
@@ -147,6 +282,10 @@ pub struct SatelliteSummary {
     pub passes_scheduled: usize,
     /// Total scheduled contact time.
     pub contact_scheduled: Seconds,
+    /// In a plan built with a floor: the useful contact the plan was required to give this
+    /// satellite, which is what the greedy plan gives it. `None` otherwise, and for a satellite
+    /// with no request.
+    pub floor: Option<Seconds>,
 }
 
 impl SatelliteSummary {
@@ -171,8 +310,11 @@ pub struct StationSummary {
     pub station: StationId,
     /// The station's name.
     pub name: String,
-    /// The time it needs between passes.
+    /// The fixed time it needs between passes.
     pub turnaround: Seconds,
+    /// How fast it turns its antenna, if it has slew limits. The schedulers add the time to
+    /// turn from the end of one pass to the start of the next to the turnaround.
+    pub slew_rates: Option<SlewRates>,
     /// How many passes were found over it, usable or not.
     pub passes_found: usize,
     /// How many of them are in the plan.
@@ -187,6 +329,9 @@ pub struct StationSummary {
 pub struct ContactPlan {
     /// The scheduler that built it.
     pub scheduler: Scheduler,
+    /// For a plan from the optimal scheduler, whether it is proven best. `None` for a greedy
+    /// plan.
+    pub optimality: Option<Optimality>,
     /// Every pass that was found, in order of AOS, then station and satellite.
     pub entries: Vec<PlanEntry>,
     /// One summary per satellite, in order of satellite number.
@@ -292,11 +437,53 @@ pub fn plan_contacts(
     requests: &[SatelliteRequest],
     scheduler: Scheduler,
 ) -> Result<ContactPlan, GroundError> {
+    plan_contacts_with(
+        survey,
+        satellites,
+        stations,
+        requests,
+        &PlanOptions::new(scheduler),
+    )
+}
+
+/// Builds a contact plan as [`plan_contacts`] does, with every option set by the caller.
+///
+/// Use this to give the optimal scheduler a time limit other than
+/// [`DEFAULT_OPTIMAL_TIME_LIMIT`].
+///
+/// # Errors
+///
+/// As for [`plan_contacts`]. Reaching the time limit is not an error: the plan returned is the
+/// best found, and [`ContactPlan::optimality`] says it is not proven.
+pub fn plan_contacts_with(
+    survey: &WindowSurvey,
+    satellites: &[Satellite],
+    stations: &[GroundStation],
+    requests: &[SatelliteRequest],
+    options: &PlanOptions,
+) -> Result<ContactPlan, GroundError> {
+    let scheduler = options.scheduler;
     let windows = &survey.windows;
     let rules: Vec<StationRule> = stations.iter().map(GroundStation::rule).collect();
-    let verdicts = match scheduler {
-        Scheduler::Greedy => greedy_verdicts(windows, requests, &rules)?,
-        Scheduler::Optimal => schedule_optimal(windows, requests, &rules)?,
+    let mut floors: Option<Vec<u64>> = None;
+    let (verdicts, optimality) = match scheduler {
+        Scheduler::Greedy => (greedy_verdicts(windows, requests, &rules)?, None),
+        Scheduler::Optimal => {
+            let outcome = schedule_optimal(
+                windows,
+                requests,
+                &rules,
+                options.optimal_time_limit,
+                options.satellite_floor,
+            )?;
+            let optimality = Optimality {
+                proven: outcome.proven_optimal,
+                time_limit: options.optimal_time_limit,
+                satellite_floor: options.satellite_floor,
+            };
+            floors = outcome.floors;
+            (outcome.verdicts, Some(optimality))
+        }
     };
 
     let names = Names {
@@ -309,6 +496,7 @@ pub fn plan_contacts(
         requests,
         rules: &rules,
         names: &names,
+        satellite_floor: floors.is_some(),
     };
 
     // One entry per window, then one per pass the survey turned down. `blocked_by` still refers
@@ -372,7 +560,8 @@ pub fn plan_contacts(
     let scheduled: Vec<bool> = verdicts.iter().map(Verdict::is_scheduled).collect();
     Ok(ContactPlan {
         scheduler,
-        satellites: satellite_summaries(&entries, requests, &names),
+        optimality,
+        satellites: satellite_summaries(&entries, requests, &names, floors.as_deref()),
         stations: station_summaries(&entries, stations, &rules, &names),
         failures: survey
             .failures
@@ -445,6 +634,8 @@ struct Context<'a> {
     requests: &'a [SatelliteRequest],
     rules: &'a [StationRule],
     names: &'a Names<'a>,
+    /// Whether the plan was built with a floor under every satellite.
+    satellite_floor: bool,
 }
 
 /// The format for times inside detail sentences.
@@ -520,22 +711,36 @@ impl Context<'_> {
                 tie_break(window, other, index, verdict.blocked_by)
             ),
             (ReasonCode::StationTurnaround, _, Some(other)) => {
-                let turnaround = turnaround_for(self.rules, window.station()).get();
-                let gap = if other.los() <= window.aos() {
-                    other
-                        .los()
-                        .seconds_until(window.aos())
-                        .map(|gap| format!("begins {} s after", gap.get()))
+                let rule = rule_for(self.rules, window.station());
+                // The pass that comes first in time, and how far apart the two are.
+                let (earlier, later, position) = if other.los() <= window.aos() {
+                    (other, window, "begins")
                 } else {
-                    window
-                        .los()
-                        .seconds_until(other.aos())
-                        .map(|gap| format!("ends {} s before", gap.get()))
-                }
-                .unwrap_or_else(|| "is too close to".to_owned());
+                    (window, other, "ends")
+                };
+                let gap = earlier
+                    .los()
+                    .seconds_until(later.aos())
+                    .map_or_else(|| "too close".to_owned(), |gap| format!("{} s", gap.get()));
+                let side = if position == "begins" {
+                    "after"
+                } else {
+                    "before"
+                };
+                let needs = match rule.slew_time(earlier, later).get() {
+                    0 => format!(
+                        "{station} needs {} s between passes",
+                        rule.turnaround().get()
+                    ),
+                    slew => format!(
+                        "{station} needs {} s between these two passes ({} s fixed plus {slew} s \
+                         to turn its antenna from the end of one to the start of the other)",
+                        rule.gap_needed(earlier, later).get(),
+                        rule.turnaround().get()
+                    ),
+                };
                 format!(
-                    "{station} needs {turnaround} s between passes and this pass {gap} the pass \
-                     of {} ({})",
+                    "{needs} and this pass {position} {gap} {side} the pass of {} ({})",
                     self.names.satellite(other.satellite()),
                     Self::span(other)?
                 )
@@ -546,26 +751,43 @@ impl Context<'_> {
                 Self::span(other)?
             ),
             (ReasonCode::OutweighedByPlan, _, Some(other)) => {
-                let turnaround = turnaround_for(self.rules, window.station());
-                let clash = match conflict(window, other, turnaround) {
+                let rule = rule_for(self.rules, window.station());
+                let clash = match conflict(window, other, &rule) {
                     Some(Conflict::SatelliteOverlap) => format!(
                         "{satellite} is scheduled with {} {}",
                         self.names.station(other.station()),
                         Self::span(other)?
                     ),
-                    Some(Conflict::StationTurnaround) => format!(
-                        "{} has {station} {}, within its {} s turnaround time",
-                        self.names.satellite(other.satellite()),
-                        Self::span(other)?,
-                        turnaround.get()
-                    ),
+                    Some(Conflict::StationTurnaround) => {
+                        let (earlier, later) = if other.los() <= window.aos() {
+                            (other, window)
+                        } else {
+                            (window, other)
+                        };
+                        format!(
+                            "{} has {station} {}, and {station} needs {} s between the two passes",
+                            self.names.satellite(other.satellite()),
+                            Self::span(other)?,
+                            rule.gap_needed(earlier, later).get()
+                        )
+                    }
                     _ => format!(
                         "{} has {station} {}",
                         self.names.satellite(other.satellite()),
                         Self::span(other)?
                     ),
                 };
-                format!("{clash}; using this pass instead would not raise the plan's total value")
+                if self.satellite_floor {
+                    format!(
+                        "{clash}; using this pass instead would not raise the plan's total \
+                         value, or would leave a satellite with less contact than the greedy \
+                         plan gives it"
+                    )
+                } else {
+                    format!(
+                        "{clash}; using this pass instead would not raise the plan's total value"
+                    )
+                }
             }
             // A reason this function has no sentence for. The summary still explains it.
             (reason, _, _) => reason.summary().to_owned(),
@@ -611,7 +833,14 @@ fn satellite_summaries(
     entries: &[PlanEntry],
     requests: &[SatelliteRequest],
     names: &Names<'_>,
+    floors: Option<&[u64]>,
 ) -> Vec<SatelliteSummary> {
+    // `floors` is in the order of `requests`.
+    let floor_of = |satellite: SatelliteId| {
+        let position = requests.iter().position(|r| r.satellite() == satellite)?;
+        let seconds = *floors?.get(position)?;
+        Some(Seconds::new(u32::try_from(seconds).unwrap_or(u32::MAX)))
+    };
     let mut ids: Vec<SatelliteId> = requests
         .iter()
         .map(SatelliteRequest::satellite)
@@ -629,6 +858,7 @@ fn satellite_summaries(
                 passes_found: mine().count(),
                 passes_scheduled: mine().filter(|e| e.is_scheduled()).count(),
                 contact_scheduled: contact(mine()),
+                floor: floor_of(satellite),
             }
         })
         .collect()
@@ -653,7 +883,8 @@ fn station_summaries(
             StationSummary {
                 station,
                 name: names.station(station),
-                turnaround: turnaround_for(rules, station),
+                turnaround: rule_for(rules, station).turnaround(),
+                slew_rates: rule_for(rules, station).slew_rates(),
                 passes_found: mine().count(),
                 passes_scheduled: mine().filter(|e| e.is_scheduled()).count(),
                 contact_scheduled: contact(mine()),
@@ -696,6 +927,26 @@ impl ContactPlan {
             self.scheduled_contact().get(),
             self.value
         );
+        let floored = self.optimality.is_some_and(|o| o.satellite_floor);
+        if floored {
+            let _ = writeln!(
+                out,
+                "  Floor: no satellite has less useful contact than the greedy plan gives it"
+            );
+        }
+        if let Some(Optimality {
+            proven: false,
+            time_limit,
+            ..
+        }) = self.optimality
+        {
+            let _ = writeln!(
+                out,
+                "  NOT PROVEN OPTIMAL: the search reached its time limit of {} s; this is the \
+                 best plan it had found, worth at least as much as the greedy plan",
+                time_limit.as_secs_f64()
+            );
+        }
         if !self.is_complete() {
             let _ = writeln!(
                 out,
@@ -762,9 +1013,11 @@ impl ContactPlan {
 
         let _ = writeln!(out, "\nSATELLITES");
         let width = name_width(&mut self.satellites.iter().map(|s| s.name.as_str()), "NAME");
+        // The FLOOR column is printed only for a plan built with a floor.
+        let floor_heading = if floored { "      FLOOR  " } else { "" };
         let _ = writeln!(
             out,
-            "  {:<width$}  {:>3}  {:>9}  {:>9}  {:>6}  NEED MET",
+            "  {:<width$}  {:>3}  {:>9}  {floor_heading}{:>9}  {:>6}  NEED MET",
             "NAME", "PRI", "NEED", "SCHEDULED", "PASSES",
         );
         for satellite in &self.satellites {
@@ -783,9 +1036,14 @@ impl ContactPlan {
                 Some(false) => "NO",
                 None => "-",
             };
+            let floor = match (floored, satellite.floor) {
+                (false, _) => String::new(),
+                (true, Some(floor)) => format!("{:>9} s  ", floor.get()),
+                (true, None) => format!("{:>11}  ", "-"),
+            };
             let _ = writeln!(
                 out,
-                "  {:<width$}  {priority:>3}  {need:>9}  {:>7} s  {:>2} of {:<2}  {met}",
+                "  {:<width$}  {priority:>3}  {need:>9}  {floor}{:>7} s  {:>2} of {:<2}  {met}",
                 satellite.name,
                 satellite.contact_scheduled.get(),
                 satellite.passes_scheduled,
@@ -795,17 +1053,34 @@ impl ContactPlan {
 
         let _ = writeln!(out, "\nSTATIONS");
         let width = name_width(&mut self.stations.iter().map(|s| s.name.as_str()), "NAME");
+        // Slew rates as "azimuth/elevation" in degrees per second, or "-" for a station
+        // without slew limits.
+        let slew: Vec<String> = self
+            .stations
+            .iter()
+            .map(|station| match station.slew_rates {
+                Some(rates) => format!(
+                    "{:.2}/{:.2} deg/s",
+                    f64::from(rates.azimuth_centidegrees_per_second()) / 100.0,
+                    f64::from(rates.elevation_centidegrees_per_second()) / 100.0
+                ),
+                None => "-".to_owned(),
+            })
+            .collect();
+        const SLEW_HEADING: &str = "SLEW AZ/EL";
+        let slew_width = name_width(&mut slew.iter().map(String::as_str), SLEW_HEADING);
         let _ = writeln!(
             out,
-            "  {:<width$}  {:>10}  {:>9}  {:>6}",
-            "NAME", "TURNAROUND", "SCHEDULED", "PASSES",
+            "  {:<width$}  {:>10}  {:>slew_width$}  {:>9}  {:>6}",
+            "NAME", "TURNAROUND", SLEW_HEADING, "SCHEDULED", "PASSES",
         );
-        for station in &self.stations {
+        for (station, slew) in self.stations.iter().zip(&slew) {
             let _ = writeln!(
                 out,
-                "  {:<width$}  {:>8} s  {:>7} s  {:>2} of {}",
+                "  {:<width$}  {:>8} s  {:>slew_width$}  {:>7} s  {:>2} of {}",
                 station.name,
                 station.turnaround.get(),
+                slew,
                 station.contact_scheduled.get(),
                 station.passes_scheduled,
                 station.passes_found,
@@ -833,6 +1108,20 @@ pub const JSON_SCHEMA: &str = "maat.contact-plan/1";
 /// The format for times in JSON: ISO 8601 in UTC, with milliseconds.
 const JSON_TIME: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 
+/// A window's pointing at AOS and LOS in degrees, if it records one.
+fn pointing_json(window: ContactWindow) -> Option<Value> {
+    let degrees = |pointing: Pointing| {
+        json!({
+            "azimuth_deg": f64::from(pointing.azimuth.centidegrees()) / 100.0,
+            "elevation_deg": f64::from(pointing.elevation.centidegrees()) / 100.0,
+        })
+    };
+    Some(json!({
+        "aos": degrees(window.aos_pointing()?),
+        "los": degrees(window.los_pointing()?),
+    }))
+}
+
 fn reason_json(reason: ReasonCode) -> Value {
     json!({
         "code": reason.id(),
@@ -859,6 +1148,8 @@ impl ContactPlan {
                     "los": entry.los.format(JSON_TIME).to_string(),
                     "duration_s": entry.duration_seconds(),
                     "max_elevation_deg": entry.max_elevation_deg,
+                    // Where the antenna points at each end of the window, or `null`.
+                    "pointing": entry.window.and_then(pointing_json),
                     "priority": entry.priority.map(Priority::get),
                     "scheduled": entry.is_scheduled(),
                     "decided_by": entry.decided_by.name(),
@@ -888,6 +1179,8 @@ impl ContactPlan {
                     "passes_found": satellite.passes_found,
                     "passes_scheduled": satellite.passes_scheduled,
                     "contact_scheduled_s": satellite.contact_scheduled.get(),
+                    // `null` unless the plan was built with a floor.
+                    "floor_s": satellite.floor.map(Seconds::get),
                     "need_met": satellite.need_met(),
                 })
             })
@@ -901,6 +1194,11 @@ impl ContactPlan {
                     "id": station.station.get(),
                     "name": station.name,
                     "turnaround_s": station.turnaround.get(),
+                    // `null` for a station without slew limits.
+                    "slew_rates_deg_per_s": station.slew_rates.map(|rates| json!({
+                        "azimuth": f64::from(rates.azimuth_centidegrees_per_second()) / 100.0,
+                        "elevation": f64::from(rates.elevation_centidegrees_per_second()) / 100.0,
+                    })),
                     "passes_found": station.passes_found,
                     "passes_scheduled": station.passes_scheduled,
                     "contact_scheduled_s": station.contact_scheduled.get(),
@@ -912,6 +1210,12 @@ impl ContactPlan {
         json!({
             "schema": JSON_SCHEMA,
             "scheduler": self.scheduler.name(),
+            // `null` for a greedy plan, which has nothing to prove.
+            "optimality": self.optimality.map(|optimality| json!({
+                "proven": optimality.proven,
+                "time_limit_s": optimality.time_limit.as_secs_f64(),
+                "satellite_floor": optimality.satellite_floor,
+            })),
             "complete": self.is_complete(),
             "totals": {
                 "passes": self.entries.len(),
@@ -929,7 +1233,7 @@ impl ContactPlan {
 
     /// Renders the plan as indented JSON for another program to read.
     ///
-    /// The top level has `schema` ([`JSON_SCHEMA`]), `scheduler`, `complete`, `totals`,
+    /// The top level has `schema` ([`JSON_SCHEMA`]), `scheduler`, `optimality`, `complete`, `totals`,
     /// `entries`, `satellites`, `stations` and `failures`. Each entry carries its `reason` as an
     /// object with the stable `code` (`"MAAT-101"`), its `number`, `class` and `summary`, plus
     /// the `detail` sentence and, for a pass that lost to another, `blocked_by`: the `index` of
@@ -944,9 +1248,10 @@ impl ContactPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::station::SlewLimits;
     use crate::station::StationSite;
     use crate::survey::{RejectedPass, SurveyFailure};
-    use crate::testkit::{Lcg, random_instance, request, window};
+    use crate::testkit::{Lcg, pointed, random_instance, request, window};
     use chrono::TimeZone;
 
     // --- Helpers -------------------------------------------------------------------------------
@@ -1004,6 +1309,256 @@ mod tests {
     #[test]
     fn t0_is_the_date_the_tests_assume() {
         assert_eq!(at(0), Utc.with_ymd_and_hms(2026, 8, 1, 12, 0, 0).unwrap());
+    }
+
+    // --- Options and the time limit ------------------------------------------------------------
+
+    #[test]
+    fn options_default_to_a_one_minute_limit() {
+        assert_eq!(DEFAULT_OPTIMAL_TIME_LIMIT, Duration::from_secs(60));
+        let options = PlanOptions::new(Scheduler::Optimal);
+        assert_eq!(options.scheduler, Scheduler::Optimal);
+        assert_eq!(options.optimal_time_limit, DEFAULT_OPTIMAL_TIME_LIMIT);
+        assert!(!options.satellite_floor);
+        let short = options.with_optimal_time_limit(Duration::from_millis(250));
+        assert_eq!(short.optimal_time_limit, Duration::from_millis(250));
+        assert_eq!(short.scheduler, Scheduler::Optimal);
+    }
+
+    #[test]
+    fn plan_contacts_is_plan_contacts_with_the_default_options() {
+        let windows = vec![w(1, 1, 0, 600), w(2, 1, 300, 900), w(2, 2, 2_000, 2_450)];
+        let stations = [station(1, "Seattle", 30), station(2, "Quito", 0)];
+        let requests = [request(1, 9), request(2, 1)];
+        for scheduler in [Scheduler::Greedy, Scheduler::Optimal] {
+            let plain = plan_contacts(
+                &survey(windows.clone()),
+                &[],
+                &stations,
+                &requests,
+                scheduler,
+            );
+            let with = plan_contacts_with(
+                &survey(windows.clone()),
+                &[],
+                &stations,
+                &requests,
+                &PlanOptions::new(scheduler),
+            );
+            assert_eq!(plain.unwrap(), with.unwrap());
+        }
+    }
+
+    #[test]
+    fn a_greedy_plan_has_no_optimality_and_an_optimal_plan_says_it_is_proven() {
+        let windows = vec![w(1, 1, 0, 600), w(2, 1, 300, 900)];
+        let stations = [station(1, "Seattle", 0)];
+        let requests = [request(1, 9), request(2, 1)];
+        let greedy = plan(windows.clone(), &stations, &requests, Scheduler::Greedy);
+        assert_eq!(greedy.optimality, None);
+
+        let optimal = plan(windows, &stations, &requests, Scheduler::Optimal);
+        assert_eq!(
+            optimal.optimality,
+            Some(Optimality {
+                proven: true,
+                time_limit: DEFAULT_OPTIMAL_TIME_LIMIT,
+                satellite_floor: false,
+            })
+        );
+        assert!(!optimal.to_text().contains("NOT PROVEN"));
+        let json: Value = serde_json::from_str(&optimal.to_json()).unwrap();
+        assert_eq!(
+            json["optimality"],
+            json!({ "proven": true, "time_limit_s": 60.0, "satellite_floor": false })
+        );
+        let json: Value = serde_json::from_str(&greedy.to_json()).unwrap();
+        assert_eq!(json["optimality"], Value::Null);
+    }
+
+    #[test]
+    fn a_plan_cut_short_by_the_time_limit_says_so_and_is_still_a_whole_plan() {
+        // No time at all: the solver cannot prove anything, so the plan is the greedy one,
+        // explained in the optimal scheduler's terms and flagged wherever it is printed.
+        let mut rng = Lcg(0x7469_6d65);
+        let instance = random_instance(&mut rng, 60);
+        let stations: Vec<GroundStation> = (1..=3)
+            .map(|id| station(id, &format!("S{id}"), 0))
+            .collect();
+        let build = |options: &PlanOptions| {
+            plan_contacts_with(
+                &survey(instance.windows.clone()),
+                &[],
+                &stations,
+                &instance.requests,
+                options,
+            )
+            .unwrap()
+        };
+        let cut_short =
+            build(&PlanOptions::new(Scheduler::Optimal).with_optimal_time_limit(Duration::ZERO));
+        let greedy = build(&PlanOptions::new(Scheduler::Greedy));
+
+        assert_eq!(
+            cut_short.optimality,
+            Some(Optimality {
+                proven: false,
+                time_limit: Duration::ZERO,
+                satellite_floor: false,
+            })
+        );
+        assert_eq!(cut_short.entries.len(), instance.windows.len());
+        assert!(cut_short.value >= greedy.value);
+        for entry in &cut_short.entries {
+            assert!(!entry.detail.is_empty());
+        }
+
+        let text = cut_short.to_text();
+        assert!(
+            text.lines().nth(3).unwrap().starts_with(
+                "  NOT PROVEN OPTIMAL: the search reached its time limit of 0 s; this is the best"
+            ),
+            "{text}"
+        );
+        let json: Value = serde_json::from_str(&cut_short.to_json()).unwrap();
+        assert_eq!(
+            json["optimality"],
+            json!({ "proven": false, "time_limit_s": 0.0, "satellite_floor": false })
+        );
+    }
+
+    #[test]
+    fn time_until_first_pass_is_measured_to_the_earliest_window() {
+        // Windows out of order: the first to begin is 300 s after T0.
+        let survey = survey(vec![
+            w(1, 1, 900, 1_200),
+            w(2, 1, 300, 600),
+            w(3, 2, 5_000, 5_100),
+        ]);
+        assert_eq!(
+            time_until_first_pass(&survey, at(0)),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            time_until_first_pass(&survey, at(-3_600)),
+            Some(Duration::from_secs(3_900))
+        );
+        // Sub-second times are kept.
+        assert_eq!(
+            time_until_first_pass(&survey, at(299) + chrono::Duration::milliseconds(250)),
+            Some(Duration::from_millis(750))
+        );
+    }
+
+    #[test]
+    fn there_is_no_time_until_a_pass_that_has_begun_or_when_there_are_no_passes() {
+        let survey_with = survey(vec![w(1, 1, 300, 600)]);
+        assert_eq!(time_until_first_pass(&survey_with, at(300)), None);
+        assert_eq!(time_until_first_pass(&survey_with, at(450)), None);
+        assert_eq!(time_until_first_pass(&survey(Vec::new()), at(0)), None);
+    }
+
+    // --- A floor for each satellite ------------------------------------------------------------
+
+    /// One station. Satellite 1 has a 100 s pass; satellite 2 has two 60 s passes that overlap
+    /// it. Greedy gives satellite 1 its pass; the best total gives satellite 2 both of its.
+    fn contested(options: &PlanOptions) -> ContactPlan {
+        plan_contacts_with(
+            &survey(vec![w(1, 1, 0, 100), w(2, 1, 0, 60), w(2, 1, 60, 120)]),
+            &[],
+            &[station(1, "Seattle", 0)],
+            &[request(1, 5), request(2, 5)],
+            options,
+        )
+        .unwrap()
+    }
+
+    fn contact_of(plan: &ContactPlan, satellite: u32) -> u32 {
+        plan.satellites
+            .iter()
+            .find(|s| s.satellite.get() == satellite)
+            .unwrap()
+            .contact_scheduled
+            .get()
+    }
+
+    #[test]
+    fn a_floor_keeps_every_satellite_at_its_greedy_share() {
+        let free = contested(&PlanOptions::new(Scheduler::Optimal));
+        assert_eq!((contact_of(&free, 1), contact_of(&free, 2)), (0, 120));
+        assert!(!free.optimality.unwrap().satellite_floor);
+        assert!(free.satellites.iter().all(|s| s.floor.is_none()));
+
+        let floored = contested(&PlanOptions::new(Scheduler::Optimal).with_satellite_floor(true));
+        assert_eq!((contact_of(&floored, 1), contact_of(&floored, 2)), (100, 0));
+        let optimality = floored.optimality.unwrap();
+        assert!(optimality.satellite_floor && optimality.proven);
+        assert_eq!(floored.satellites[0].floor, Some(Seconds::new(100)));
+        assert_eq!(floored.satellites[1].floor, Some(Seconds::ZERO));
+        // The passes that lost say that the floor is part of the reason.
+        assert_eq!(floored.entries[1].reason, ReasonCode::OutweighedByPlan);
+        assert!(
+            floored.entries[1].detail.ends_with(
+                "using this pass instead would not raise the plan's total value, or would \
+                 leave a satellite with less contact than the greedy plan gives it"
+            ),
+            "{}",
+            floored.entries[1].detail
+        );
+    }
+
+    #[test]
+    fn the_greedy_scheduler_ignores_the_floor_option() {
+        let plain = contested(&PlanOptions::new(Scheduler::Greedy));
+        let asked = contested(&PlanOptions::new(Scheduler::Greedy).with_satellite_floor(true));
+        assert_eq!(plain, asked);
+        assert!(asked.satellites.iter().all(|s| s.floor.is_none()));
+        assert!(!asked.to_text().contains("FLOOR"));
+    }
+
+    #[test]
+    fn a_plan_with_a_floor_shows_it_in_text_and_json() {
+        let floored = contested(&PlanOptions::new(Scheduler::Optimal).with_satellite_floor(true));
+        let text = floored.to_text();
+        assert_eq!(
+            text.lines().nth(3).unwrap(),
+            "  Floor: no satellite has less useful contact than the greedy plan gives it"
+        );
+        assert!(
+            text.contains(
+                "SATELLITES\n  \
+                   NAME         PRI       NEED        FLOOR  SCHEDULED  PASSES  NEED MET\n  \
+                   satellite 1    5        all        100 s      100 s   1 of 1   -\n  \
+                   satellite 2    5        all          0 s        0 s   0 of 2   -\n"
+            ),
+            "{text}"
+        );
+        for line in text.lines() {
+            assert_eq!(line, line.trim_end(), "trailing space in {line:?}");
+        }
+
+        let json: Value = serde_json::from_str(&floored.to_json()).unwrap();
+        assert_eq!(json["optimality"]["satellite_floor"], true);
+        assert_eq!(json["satellites"][0]["floor_s"], 100);
+        assert_eq!(json["satellites"][1]["floor_s"], 0);
+    }
+
+    #[test]
+    fn a_satellite_without_a_request_has_no_floor() {
+        let plan = plan_contacts_with(
+            &survey(vec![w(1, 1, 0, 100), w(9, 1, 200, 300)]),
+            &[],
+            &[station(1, "Seattle", 0)],
+            &[request(1, 5)],
+            &PlanOptions::new(Scheduler::Optimal).with_satellite_floor(true),
+        )
+        .unwrap();
+        assert_eq!(plan.satellites[0].floor, Some(Seconds::new(100)));
+        assert_eq!(plan.satellites[1].floor, None);
+        assert!(
+            plan.to_text()
+                .contains("satellite 9    -          -            -        0 s")
+        );
     }
 
     // --- Structure -----------------------------------------------------------------------------
@@ -1089,12 +1644,20 @@ mod tests {
         for round in 0..80 {
             let instance = random_instance(&mut rng, 30);
             for scheduler in [Scheduler::Greedy, Scheduler::Optimal] {
+                // Stations with the instance's turnaround times, and a slow mount on each so
+                // that the time to turn between passes is in play.
                 let stations: Vec<GroundStation> = (1..=3)
                     .map(|id| {
-                        let turnaround = turnaround_for(&instance.rules, StationId::new(id));
+                        let turnaround = rule_for(&instance.rules, StationId::new(id)).turnaround();
                         station(id, &format!("S{id}"), turnaround.get())
+                            .with_slew_limits(SlewLimits {
+                                azimuth_deg_per_s: 2.0,
+                                elevation_deg_per_s: 2.0,
+                            })
+                            .unwrap()
                     })
                     .collect();
+                let rules: Vec<StationRule> = stations.iter().map(GroundStation::rule).collect();
                 let plan = plan(
                     instance.windows.clone(),
                     &stations,
@@ -1112,10 +1675,9 @@ mod tests {
                         other.is_scheduled(),
                         "round {round}: blocker is not scheduled"
                     );
-                    let turnaround = turnaround_for(&instance.rules, entry.station);
+                    let rule = rule_for(&rules, entry.station);
                     assert!(
-                        conflict(&entry.window.unwrap(), &other.window.unwrap(), turnaround)
-                            .is_some(),
+                        conflict(&entry.window.unwrap(), &other.window.unwrap(), &rule).is_some(),
                         "round {round}: entry {index} does not conflict with its blocker"
                     );
                 }
@@ -1248,6 +1810,72 @@ mod tests {
         );
     }
 
+    /// A station that turns at 6 degrees per second in azimuth and 2.5 in elevation.
+    fn rotating(id: u16, name: &str, turnaround: u32) -> GroundStation {
+        station(id, name, turnaround)
+            .with_slew_limits(SlewLimits {
+                azimuth_deg_per_s: 6.0,
+                elevation_deg_per_s: 2.5,
+            })
+            .unwrap()
+    }
+
+    /// A window with pointing, counted from `T0`.
+    fn p(sat: u32, station: u16, aos: i64, los: i64, rise: u16, set: u16) -> ContactWindow {
+        pointed(sat, station, T0 + aos, T0 + los, rise, set)
+    }
+
+    #[test]
+    fn a_turnaround_conflict_at_a_slewing_station_gives_both_parts_of_the_time_needed() {
+        // The first pass sets due east; the second rises due west 60 s later. Seattle needs
+        // 45 s fixed plus half a turn at 6 deg/s (30 s): 75 s.
+        let windows = vec![p(1, 1, 0, 600, 0, 9_000), p(2, 1, 660, 900, 27_000, 0)];
+        let requests = [request(1, 9), request(2, 1)];
+
+        let slewing = plan(
+            windows.clone(),
+            &[rotating(1, "Seattle", 45)],
+            &requests,
+            Scheduler::Greedy,
+        );
+        assert_eq!(slewing.entries[1].reason, ReasonCode::StationTurnaround);
+        assert_eq!(slewing.entries[1].blocked_by, Some(0));
+        assert_eq!(
+            slewing.entries[1].detail,
+            "Seattle needs 75 s between these two passes (45 s fixed plus 30 s to turn its \
+             antenna from the end of one to the start of the other) and this pass begins 60 s \
+             after the pass of satellite 1 (from 2026-08-01 12:00:00 to 2026-08-01 12:10:00)"
+        );
+
+        // The same passes at a station with no slew limits fit: 60 s is more than 45.
+        let fixed = plan(
+            windows,
+            &[station(1, "Seattle", 45)],
+            &requests,
+            Scheduler::Greedy,
+        );
+        assert!(fixed.entries[1].is_scheduled());
+    }
+
+    #[test]
+    fn the_optimal_scheduler_explains_a_slew_conflict_with_the_time_needed() {
+        let windows = vec![p(1, 1, 0, 600, 0, 9_000), p(2, 1, 660, 900, 27_000, 0)];
+        let plan = plan(
+            windows,
+            &[rotating(1, "Seattle", 45)],
+            &[request(1, 5), request(2, 5)],
+            Scheduler::Optimal,
+        );
+        assert_eq!(plan.entries[1].reason, ReasonCode::OutweighedByPlan);
+        assert!(
+            plan.entries[1]
+                .detail
+                .contains("and Seattle needs 75 s between the two passes"),
+            "{}",
+            plan.entries[1].detail
+        );
+    }
+
     #[test]
     fn a_satellite_conflict_names_the_other_station() {
         let windows = vec![w(7, 1, 0, 300), w(7, 2, 100, 600)];
@@ -1333,7 +1961,9 @@ mod tests {
         assert!(
             turnaround_clash.entries[1]
                 .detail
-                .contains("within its 60 s turnaround time")
+                .contains("and Seattle needs 60 s between the two passes"),
+            "{}",
+            turnaround_clash.entries[1].detail
         );
     }
 
@@ -1564,9 +2194,9 @@ SATELLITES
   satellite 2    1        all      450 s   1 of 2   -
 
 STATIONS
-  NAME     TURNAROUND  SCHEDULED  PASSES
-  Seattle        30 s      600 s   1 of 2
-  Quito           0 s      450 s   1 of 1
+  NAME     TURNAROUND  SLEW AZ/EL  SCHEDULED  PASSES
+  Seattle        30 s           -      600 s   1 of 2
+  Quito           0 s           -      450 s   1 of 1
 ";
         assert_eq!(small_plan().to_text(), expected);
     }
@@ -1641,6 +2271,7 @@ STATIONS
                 "los": "2026-08-01T12:15:00.000Z",
                 "duration_s": 600.0,
                 "max_elevation_deg": 90.0,
+                "pointing": null,
                 "priority": 1,
                 "scheduled": false,
                 "decided_by": "scheduler",
@@ -1682,7 +2313,7 @@ STATIONS
                 "id": 1, "name": "satellite 1",
                 "request": { "priority": 9, "min_contact_s": 0, "need_s": 500 },
                 "passes_found": 1, "passes_scheduled": 1,
-                "contact_scheduled_s": 600, "need_met": true,
+                "contact_scheduled_s": 600, "floor_s": null, "need_met": true,
             })
         );
         assert_eq!(json["satellites"][1]["request"]["need_s"], Value::Null);
@@ -1691,10 +2322,44 @@ STATIONS
         assert_eq!(
             json["stations"][0],
             json!({
-                "id": 1, "name": "Seattle", "turnaround_s": 30,
+                "id": 1, "name": "Seattle", "turnaround_s": 30, "slew_rates_deg_per_s": null,
                 "passes_found": 3, "passes_scheduled": 2, "contact_scheduled_s": 900,
             })
         );
+    }
+
+    #[test]
+    fn json_carries_pointing_and_slew_rates_when_they_are_known() {
+        let plan = plan(
+            vec![p(1, 1, 0, 600, 4_550, 31_025), w(2, 1, 2_000, 2_300)],
+            &[rotating(1, "Seattle", 45)],
+            &[request(1, 9), request(2, 1)],
+            Scheduler::Greedy,
+        );
+        let json: Value = serde_json::from_str(&plan.to_json()).unwrap();
+        assert_eq!(
+            json["entries"][0]["pointing"],
+            json!({
+                "aos": { "azimuth_deg": 45.5, "elevation_deg": 10.0 },
+                "los": { "azimuth_deg": 310.25, "elevation_deg": 10.0 },
+            })
+        );
+        assert_eq!(json["entries"][1]["pointing"], Value::Null);
+        assert_eq!(
+            json["stations"][0]["slew_rates_deg_per_s"],
+            json!({ "azimuth": 6.0, "elevation": 2.5 })
+        );
+        assert_eq!(plan.stations[0].slew_rates, plan_rule(&plan).slew_rates());
+        assert!(plan.to_text().contains(
+            "  NAME     TURNAROUND       SLEW AZ/EL  SCHEDULED  PASSES\n  \
+               Seattle        45 s  6.00/2.50 deg/s"
+        ));
+    }
+
+    /// The rule of the one station in a one-station plan built with [`rotating`].
+    fn plan_rule(plan: &ContactPlan) -> StationRule {
+        assert_eq!(plan.stations.len(), 1);
+        rotating(1, "Seattle", 45).rule()
     }
 
     #[test]

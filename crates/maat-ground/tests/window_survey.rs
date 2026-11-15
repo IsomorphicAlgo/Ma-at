@@ -326,12 +326,46 @@ fn the_survey_returns_exactly_what_ephemerust_finds_pair_by_pair() {
                 .iter()
                 .map(|pass| window_from_pass(satellite, station.id(), pass).unwrap())
                 .collect();
+            let found = windows_for(&survey, satellite, station.id());
+            // The survey adds each window's pointing; the times and elevation must be exactly
+            // what the bridge gives for the same pass.
+            let stripped: Vec<ContactWindow> = found
+                .iter()
+                .map(|window| window.without_pointing())
+                .collect();
             assert_eq!(
-                windows_for(&survey, satellite, station.id()),
+                stripped,
                 expected,
                 "satellite {satellite} over {}",
                 station.name()
             );
+
+            // The pointing is Ephemerust's look angle at the window's own AOS and LOS. Azimuth
+            // is stored to the nearest hundredth of a degree (so within 0.005), elevation
+            // rounded down (so 0 to 0.01 below).
+            for window in &found {
+                for (time, pointing) in [
+                    (window.aos(), window.aos_pointing().unwrap()),
+                    (window.los(), window.los_pointing().unwrap()),
+                ] {
+                    let when = Utc.timestamp_opt(time.unix_seconds(), 0).unwrap();
+                    let look = propagator.look_angles(when, observer_of(station)).unwrap();
+                    let azimuth = f64::from(pointing.azimuth.centidegrees()) / 100.0;
+                    let elevation = f64::from(pointing.elevation.centidegrees()) / 100.0;
+                    let around = (azimuth - look.azimuth_deg).rem_euclid(360.0);
+                    assert!(
+                        around.min(360.0 - around) <= 0.005 + 1e-9,
+                        "azimuth {azimuth} against {}",
+                        look.azimuth_deg
+                    );
+                    let below = look.elevation_deg - elevation;
+                    assert!(
+                        (-1e-9..0.01 + 1e-9).contains(&below),
+                        "elevation {elevation} against {}",
+                        look.elevation_deg
+                    );
+                }
+            }
             expected_total += expected.len();
         }
     }

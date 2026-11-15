@@ -1,7 +1,7 @@
 //! Ground stations.
 
 use ephemerust::ObserverLocation;
-use maat_flight::{Seconds, StationId, StationRule};
+use maat_flight::{Seconds, SlewRates, StationId, StationRule};
 
 use crate::error::GroundError;
 
@@ -184,11 +184,14 @@ impl GroundStation {
         })
     }
 
-    /// Returns the station with a turnaround time: how long it needs between the end of one
-    /// pass and the start of the next, to re-point the antenna and reconfigure the radio.
+    /// Returns the station with a fixed turnaround time: how long it needs between the end of
+    /// one pass and the start of the next whatever the two passes are, for example to
+    /// reconfigure the radio and let the mount settle.
     ///
     /// The schedulers will not place two passes at this station closer together than this. A
-    /// new station has no turnaround time.
+    /// station with [slew limits](Self::with_slew_limits) needs more on top: the time to turn
+    /// its antenna from where one pass ends to where the next begins, which the schedulers work
+    /// out pass by pass. A new station has no turnaround time.
     ///
     /// ```
     /// use maat_ground::flight::{Seconds, StationId};
@@ -269,10 +272,18 @@ impl GroundStation {
         self.turnaround
     }
 
-    /// The station's scheduling rule, in the form the flight scheduler takes.
+    /// The station's scheduling rule, in the form the flight scheduler takes: its fixed
+    /// turnaround time and, if it has slew limits, its slew rates.
+    ///
+    /// The rates are converted to whole hundredths of a degree per second, rounded **down**, so
+    /// the scheduler never assumes a faster mount than the station has.
     #[must_use]
     pub fn rule(&self) -> StationRule {
-        StationRule::new(self.id, self.turnaround)
+        let rule = StationRule::new(self.id, self.turnaround);
+        match self.slew_limits.and_then(slew_rates) {
+            Some(rates) => rule.with_slew_rates(rates),
+            None => rule,
+        }
     }
 
     /// The station's position in the form Ephemerust's pass prediction takes.
@@ -284,6 +295,17 @@ impl GroundStation {
             elevation: self.site.altitude_m,
         }
     }
+}
+
+/// Converts slew limits in degrees per second to flight slew rates, rounding down.
+fn slew_rates(limits: SlewLimits) -> Option<SlewRates> {
+    // The limits were range-checked to 0.01..=180 when the station was built, so each product
+    // is between 1 and 18000 and fits a u16 after rounding down.
+    let centidegrees = |degrees_per_second: f64| (degrees_per_second * 100.0).floor() as u16;
+    SlewRates::new(
+        centidegrees(limits.azimuth_deg_per_s).max(1),
+        centidegrees(limits.elevation_deg_per_s).max(1),
+    )
 }
 
 #[cfg(test)]
@@ -434,6 +456,47 @@ mod tests {
         // The rest of the station is untouched.
         assert_eq!(station.site(), SEATTLE);
         assert_eq!(station.slew_limits(), None);
+    }
+
+    #[test]
+    fn a_station_without_slew_limits_has_a_rule_without_slew_rates() {
+        let station = GroundStation::new(ID, "Test", SEATTLE, 10.0)
+            .unwrap()
+            .with_turnaround(Seconds::new(90));
+        assert_eq!(station.rule().slew_rates(), None);
+    }
+
+    #[test]
+    fn slew_limits_reach_the_flight_rule_rounded_down() {
+        let rule = |azimuth: f64, elevation: f64| {
+            GroundStation::new(ID, "Test", SEATTLE, 10.0)
+                .unwrap()
+                .with_slew_limits(SlewLimits {
+                    azimuth_deg_per_s: azimuth,
+                    elevation_deg_per_s: elevation,
+                })
+                .unwrap()
+                .with_turnaround(Seconds::new(30))
+                .rule()
+        };
+        let rates = rule(6.0, 2.5).slew_rates().unwrap();
+        assert_eq!(rates.azimuth_centidegrees_per_second(), 600);
+        assert_eq!(rates.elevation_centidegrees_per_second(), 250);
+        assert_eq!(rule(6.0, 2.5).turnaround(), Seconds::new(30));
+
+        // 1.239 deg/s becomes 1.23, never 1.24: the scheduler must not assume a faster mount.
+        assert_eq!(
+            rule(1.239, 1.0)
+                .slew_rates()
+                .unwrap()
+                .azimuth_centidegrees_per_second(),
+            123
+        );
+        // The edges of the valid range.
+        let slowest = rule(0.01, 0.01).slew_rates().unwrap();
+        assert_eq!(slowest.azimuth_centidegrees_per_second(), 1);
+        let fastest = rule(180.0, 180.0).slew_rates().unwrap();
+        assert_eq!(fastest.elevation_centidegrees_per_second(), 18_000);
     }
 
     // --- Slew limits ---------------------------------------------------------------------------

@@ -4,11 +4,11 @@ A living record of **why** the project is built the way it is: major decisions, 
 the reasoning behind them. Append new entries as decisions are made. Do not silently rewrite
 history; mark an entry superseded or amended instead.
 
-> **Status (2026-11-15): version 0.4.0. Stages 0 and 1 approved. Stages 2 and 3 built together at
-> the owner's direction, awaiting sign-off.** Ma'at schedules contact windows with a greedy
-> scheduler in the flight crate or an optimal one on the ground, and every pass in the resulting
-> plan carries a reason code and a detail sentence. Stage 4 (exports and the full CLI) has not
-> started.
+> **Status (2026-11-15): version 0.5.0. Stages 0 to 4 approved by the owner.** Ma'at schedules
+> contact windows with a greedy scheduler in the flight crate or an optimal one on the ground,
+> and every pass in the resulting plan carries a reason code and a detail sentence. `maat plan`
+> builds a plan from a catalog file and a TOML station file and writes it as text, JSON, SatNOGS
+> observations or one station's schedule. Stage 5 (a browser demo) has not started.
 
 ---
 
@@ -180,7 +180,7 @@ conservative choice and is stated as a limitation.
   the ISS. Measured maximum 0.91 deg/s. Test bound 1.2 deg/s.
 **Limit:** The figure is an average over one second, slightly below the instantaneous peak when
 the peak is sharp. Slew *between* passes (turning from the end of one to the start of the next)
-is a scheduling constraint and is not part of Stage 1; see O-6.
+is a scheduling constraint and is not part of Stage 1; it was added in Stage 2 (D-020).
 
 ### D-013 — An orbit that passes through the Earth is refused when it is loaded
 **Decision:** `Satellite` computes the perigee height from the mean motion and eccentricity
@@ -219,9 +219,10 @@ has to move the minor number. It also makes the version say where the project is
 windows, 0.3 will have a scheduler.
 **Why not 1.0 yet:** The scheduler does not exist, and four of the ten reason codes have never
 been emitted. Calling that 1.0 would promise a stability the project has not earned.
-**Publishing:** Nothing is on crates.io yet. A version here records a state of the repository; a
-git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itself is taken there
-(O-1).
+**Publishing:** When this was written nothing was on crates.io. A version here records a state
+of the repository; a git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat`
+itself is taken there. **Updated 2026-11-15:** 0.2.0 of all three crates has since been
+published (D-028); 0.4.0 and 0.5.0 have not.
 **0.3.0 was skipped:** Stages 2 and 3 were built together at the owner's direction, so the
 repository went from 0.2.0 to 0.4.0. The changelog keeps the two stages apart inside 0.4.0.
 
@@ -238,9 +239,9 @@ This settles four open questions:
   total order, so the plan does not depend on input order or processor. A pass that loses to an
   equal priority is told so with its own code (`MAAT-107`), because "a higher-priority pass" would
   be untrue and the remedy is different.
-- **O-6, turnaround:** one fixed time per station (`StationRule`), applied before and after
-  every scheduled pass. A pass inside the gap gets `MAAT-108`. Pointing-dependent turnaround
-  would need azimuth and elevation in `ContactWindow` and is left for later.
+- **O-6, turnaround:** a fixed time per station (`StationRule`), applied before and after
+  every scheduled pass. A pass inside the gap gets `MAAT-108`. The time to turn the antenna
+  between two passes was added on top of this before sign-off (D-020).
 - **O-7, per-satellite inputs:** `SatelliteRequest` in the flight crate holds priority, minimum
   contact and need. A satellite with no request is not scheduled (`MAAT-106`).
 **Order of checks:** no request, too short, need met, station overlap, station turnaround,
@@ -299,8 +300,12 @@ naming that pass).
   the greedy plan.
 **Measured run time (release build, one desktop core):** 100 windows in under 5 ms, 1000 in 8 to
 16 ms, 3000 in 0.1 to 0.3 s.
-**Limits:** no bound on run time and no time limit in the solver; optimality is proven only up to
-16 windows; ground only.
+**Limits:** run time is bounded only by the time limit (D-021); the solver's answers are checked
+against exhaustive search only up to 16 windows; ground only.
+**Corrected 2026-11-15:** this entry first said that `microlp` has no time limit. That was wrong.
+`microlp` 0.6 accepts a time limit and a starting solution, and `good_lp` exposes both
+(`WithTimeLimit`, `Variable::initial`). The error was in the README, this file and the module
+docs of 0.4.0 as first delivered, and is corrected in all three. See D-021.
 
 ### D-018 — The contact plan: one entry per pass, explained at three levels
 **Decision:** `plan_contacts` returns a `ContactPlan` with one `PlanEntry` for every pass the
@@ -336,27 +341,261 @@ decision.
 turnaround conflict by checking the station's turnaround time; a missing request by adding one.
 `MAAT-109` is separate from `MAAT-101` because the optimal scheduler does not compare priorities
 pass against pass, so "a higher-priority pass" would be false.
-**Guarded by tests:** the frozen list in the flight tests now holds all sixteen codes, and a test
+**Guarded by tests:** the frozen list in the flight tests now holds all sixteen codes (seventeen
+since `MAAT-206`, D-020), and a test
 in `maat-ground` requires every code to have its own guidance text.
 
 ---
+
+### D-020 — Time between passes includes the turn of the antenna
+**Decision (owner, 2026-11-15: "Scheduler should account for turning"):** the time a station
+needs between two passes is its fixed turnaround plus the time to turn its antenna from where
+the first pass ends to where the second begins.
+**In the flight crate:**
+- `Azimuth` (hundredths of a degree, `0..36000`, clockwise from north) and `Pointing` (azimuth
+  and elevation). A `ContactWindow` may record its pointing at AOS and at LOS. Pointing is
+  optional so that a window built from times alone is still valid.
+- `SlewRates` (hundredths of a degree per second on each axis, never zero) on a `StationRule`.
+- `StationRule::gap_needed(earlier, later)` = fixed turnaround + `slew_time`, where the slew time
+  is that of the slower axis, in whole seconds **rounded up**, with azimuth taken the short way
+  round. It is zero unless the rule has rates and both windows record pointing.
+- `schedule::conflict(a, b, rule)` now takes the rule and applies `gap_needed`. Both schedulers
+  and every verifier call it, so the rule still has one definition.
+- One new code, `MAAT-206` (azimuth out of range). A pass lost to turning time keeps `MAAT-108`:
+  the cause and the remedy are the same kind as for the fixed turnaround, and the detail
+  sentence gives both parts ("120 s fixed plus 38 s to turn its antenna").
+**On the ground:** `contact_windows` records each window's pointing from Ephemerust's look angles
+at the window's own whole-second AOS and LOS (azimuth to the nearest hundredth, elevation rounded
+down). `GroundStation::rule` passes the station's slew limits on, rounded **down**, so the
+scheduler never assumes a faster mount than the station has.
+**In the optimal scheduler:** the clique constraints still cover overlap and the fixed
+turnaround. Turning time differs for every pair, so each pair that is too close only because of
+it gets a two-window constraint of its own. A test confirms that the cliques and pairs together
+rule out exactly the pairs `conflict` rejects.
+**What the model assumes:** both axes move at once at constant top rates; azimuth can go either
+way round. Acceleration, cable-wrap limits and keyhole behaviour near the zenith are not
+modelled; the fixed turnaround is the place to allow for them.
+**Effect, measured:** on the week of five satellites over four stations, with Seattle turning at
+2 degrees per second, the greedy plan goes from 166 passes to 165 and the optimal from 173 to
+171. The example prints one pass that clears the fixed 120 s by 2 s and is still refused,
+because the turn takes 38 s.
+**Cost, measured (release build):** the greedy scheduler is unchanged at 17 to 27 ms for 3000
+windows. The optimal scheduler takes 16 to 52 ms for 1000 windows and 0.1 to 0.5 s for 3000 in
+eight of nine problems; one problem with two slewing stations took 2.8 s. Pairwise constraints
+are weaker than cliques, so more turning conflicts mean more branching. The figures in D-016 and
+D-017 were measured before this change.
+**Verification:** 17 flight unit tests on slew time, gap and conflict, including both rounding
+boundaries and the overflow cases; the random-problem verifiers in both crates now generate
+pointing and slew rates; an end-to-end test recomputes the needed gap at Seattle from the
+recorded pointing, without calling `conflict`, for every consecutive pair in both plans; pointing
+is checked against Ephemerust's look angles for every surveyed window.
+
+### D-021 — The optimal scheduler starts from the greedy plan and stops at a time limit
+**Decision:** `plan_contacts_with` takes `PlanOptions`, which carry a time limit for the optimal
+scheduler (default 60 s). The solver is given the greedy plan as its starting point. The plan
+records whether it is proven optimal (`ContactPlan::optimality`), and says so in text and JSON.
+**The owner's question (2026-11-15):** whether the limit could be worked out from the orbit, for
+example from how many stations a satellite meets in one orbit, with 24 hours as a fallback.
+**Why the limit is not derived from the orbit:** how long a problem takes to solve depends on how
+many passes compete, not on the orbital period, and in practice it is short: under a second for
+3000 windows. What the orbit does set is the **deadline**. A plan is of no use for a pass that
+has begun, so the time until the first pass is the longest a search can usefully run.
+`time_until_first_pass(survey, now)` returns it, and the caller decides how much of it to spend.
+The default is one minute and not hours because an hour-long search would be a fault to
+investigate, not a normal run.
+**Three guarantees, whatever the limit:**
+1. The plan obeys every rule. It is checked for conflicts after the solve.
+2. The plan is worth at least as much as the greedy plan. If the limit passes before the solver
+   has a plan of its own, or its plan is worth less, the greedy plan is used.
+3. A plan is called proven only when the solver finished.
+**What this does not guarantee:** that each satellite gets at least what the greedy plan would
+have given it. The guarantee is on the plan's total value. A per-satellite floor is possible
+(one more constraint per satellite) and has not been built; see O-13.
+**A plan cut short is not reproducible across machines.** A faster machine gets further in the
+same time. A proven plan does not have this problem. The text report says "NOT PROVEN OPTIMAL"
+at the top when it applies.
+**Verification:** with a limit of zero, 40 random problems still give sound plans worth at least
+the greedy plan. With limits either side of the solve time, plans are sound, never above the
+optimum, and proven only when equal to it. The case in between, where the solver is stopped
+holding an unproven plan of its own, depends on timing; a test times the full solve and then
+stops the solver at 16 points across it (it arose 12 to 17 times in 96 tries on the development
+machine). The mapping from solver status to "proven" is tested directly, so that guarantee 3
+does not rest on timing.
+**Measured:** the greedy starting point does not change the answer or, noticeably, the time on
+problems that finish. Its value is on problems that do not: on two 400-window problems stopped
+at 40 and 80 ms (debug build), a solver without a starting point had nothing to return where the
+started one returned a plan.
+**Two deliberate faults that no test catches, and why:** removing the starting point (the
+answer is the same whenever the solver finishes, and the fallback covers it when it does not),
+and making the fallback an empty plan (the "worth at least greedy" check after it puts the
+greedy plan back). Both are second lines of defence behind another check.
+
+### D-022 — Owner's answers to the Stage 2 questions (2026-11-15)
+- **Priority is a rank in greedy and a weight in optimal:** accepted as it is (closes O-10).
+- **Storage in caller-provided slices, no dependencies:** confirmed (D-016).
+- **Ties: longer pass, then earlier AOS:** confirmed (D-016).
+- **Turning time between passes:** build it now (D-020).
+- **A time limit for the optimal scheduler:** wanted (D-021).
+- **Station files for the CLI:** TOML (O-9; to be built in Stage 4).
+
+### D-023 — A floor for each satellite in the optimal plan
+**Decision (owner, 2026-11-15: "Yes on the per satellite floor"):** an option,
+`PlanOptions::with_satellite_floor(true)` (`--floor`), under which the optimal scheduler must
+give every satellite at least the useful contact the greedy plan gives it. Off by default.
+**Why it was wanted:** D-021 guarantees the optimal plan's total. It says nothing per satellite.
+In the example week the optimal plan is worth 2.2 % more and EXAMPLE-B goes from 35 317 s to
+18 216 s, because EXAMPLE-C has the same priority and shares its orbit: the two are worth the
+same to the objective, and the solver has no reason to keep greedy's tie-break.
+**How:** one constraint per satellite, `useful contact >= greedy's useful contact`, where useful
+contact is contact counted up to the satellite's need. For a satellite whose need can be reached
+the constraint is on the same capped variable the objective uses; otherwise on its total contact.
+The greedy plan satisfies every such constraint, so it remains a valid starting point and
+fallback. After the solve the floor is checked again on the final plan; if it ever failed, the
+greedy plan would be used.
+**What "proven optimal" means with a floor:** no plan that respects the floor is worth more.
+**What it costs, measured:**
+- Example week: **all of the gain.** With the floor the optimal plan equals the greedy plan in
+  value (285 216) and gives every satellite exactly its greedy share. Three of the four
+  requested satellites share an orbit and compete for the same passes, so any gain for one is a
+  loss for another.
+- 60 crowded random problems, of which the optimal plan beat greedy in 51: the floor kept 84 %
+  of the gain on average, all of it in 31 and none of it in 4.
+- Run time (release build): on five problems of 1000 to 3000 windows the floor made no
+  difference in three (33 to 363 ms either way), took 48 ms against 28 ms in one, and took 8 to
+  10 s against about 0.5 s in one (two runs).
+**In the plan:** `Optimality::satellite_floor`; `SatelliteSummary::floor`; a "Floor:" line and a
+FLOOR column in the text report, only for a plan built with one; `floor_s` and
+`optimality.satellite_floor` in the JSON. The detail of a pass that lost says that a swap
+"would not raise the plan's total value, or would leave a satellite with less contact than the
+greedy plan gives it".
+**Verification:** three hand-built cases (the floor binds; a gain that costs nobody survives;
+the floor counts contact only up to a need); 60 random problems in which every satellite is at
+or above its greedy share and the value lies between greedy's and the unconstrained optimum's;
+200 small problems in which the plan's value equals the best found by trying every subset that
+respects the floor; the example week end to end.
+**Closes O-13.**
+
+### D-024 — Stage 4: the `maat plan` command and its files
+**Decision:** one new command, `maat plan`, which reads a satellite catalog and a TOML station
+file and writes a plan. No separate survey command: the plan already lists every pass the
+survey found, usable or not.
+**Station and request files (owner's choice of TOML, D-022):** `[[station]]` and `[[request]]`
+tables, in one file or two. The site keys are those of Chronus Gateway's `[station]` section
+(`latitude_deg`, `longitude_deg`, `altitude_m`, `minimum_elevation_deg`), so a station is
+described the same way in both projects. Unknown keys are errors (`deny_unknown_fields`): a
+misspelt option is reported with its line and never silently ignored.
+**Where the file reading lives:** in `maat-cli`. `maat-ground` stays a library of values and
+functions; it gains no file format and no new dependency.
+**New dependencies, CLI only:** `toml` 1.x with only its `parse` and `serde` features, and
+`serde` with `derive`. Both MIT OR Apache-2.0; `toml` needs Rust 1.85, below the workspace's
+1.89. `chrono`'s `now` feature is enabled in the CLI for a plan that starts at the present.
+**Still no `clap`:** the parser is about a dozen options and is tested option by option.
+**Standard output is the plan and nothing else**, so it can be piped into a file or another
+program. Everything else a person should know goes to standard error: the search window used,
+an incomplete survey, a plan not proven optimal, old element sets, skipped passes in an export,
+and requests for satellites that are not in the catalog.
+**Exit status:** 0 for a plan (including an incomplete or unproven one, which says so), 1 when
+the inputs could not be turned into a plan, 2 for a command line that makes no sense.
+**Defaults:** search from now for 24 hours, greedy scheduler, text output. A plan from the same
+files and the same `--start` is identical from run to run.
+**Verification:** 40 unit tests of the option parser, the TOML reader and the age warning; 22
+tests that run the real binary on real files and check standard output, standard error and exit
+status, including every error path above. The example files in `examples/` are the ones the
+tests use, and a test fails if the two drift apart.
+
+### D-025 — Loading catalogs of two-line element sets
+**Decision:** `satellites_from_tle` reads a file of two-line element sets, named or not, and
+`satellites_from_catalog` detects whether text is TLE or OMM. **Closes the open part of O-9.**
+**How sets are split:** blank lines are dropped; a set ends at a line 2 that follows a line 1;
+each set is handed to Ephemerust's `Tle::parse`, which checks its checksums. Lines left over
+after the last complete set are an error, as is a file with no set in it.
+**Detection:** text is TLE if a line 1 is directly followed by a line 2 (each at least 60
+characters, beginning `1 ` and `2 `). Anything else goes to the OMM reader, which detects JSON,
+KVN, XML and CSV itself.
+**Limit:** TLE cannot carry a catalog number above 99999. OMM can.
+**A deliberate fault no test catches:** dropping the 60-character test. A short line that begins
+`2 ` then ends a set early, the set fails Ephemerust's own checks, and the result is the same
+error by another route.
+
+### D-026 — What the two exports are, and what they have not been tested against
+**SatNOGS.** The SatNOGS Network's API takes, for a new observation, an object with four
+required fields: `ground_station` (the network's station number), `transmitter_uuid` (22
+characters, from SatNOGS DB), `start` and `end` (date-times). Source: the network's OpenAPI
+document, which its API page (<https://satnogs-network.readthedocs.io/en/latest/api.html>) names
+as the description of the API; the new-observation serializer was read on 2026-11-15 in a
+rendering of that document. `satnogs_schedule` writes a JSON array of exactly those
+four fields per scheduled pass, with times in ISO 8601 UTC.
+- Ma'at cannot know SatNOGS's numbers, so they are supplied: `satnogs_id` on a station and
+  `satnogs_transmitter` on a request. A scheduled pass lacking either is left out of the array
+  and listed with the reason; the two lists together always account for every scheduled pass.
+- **Not done:** the output has never been posted to the network. No claim is made that the
+  network would accept a given observation: it has rules of its own (who may schedule on a
+  station, which transmitters a station can receive, how far ahead, and overlap with existing
+  observations).
+**Chronus Gateway.** The plan called for a "Chronus export". The gateway was examined at
+1.0.0-rc.1 (commit `0383109` in the owner's working copy):
+- its configuration is one station and one orbit source, and `[station]` requires a carrier
+  frequency and element text that Ma'at does not hold, so Ma'at cannot write a gateway
+  configuration;
+- it has **no schedule or pass-list input**. A pass route (`chronus.passes.v1`) is planned for a
+  later release and is not defined yet.
+So the export is Ma'at's own document, `maat.station-schedule/1`: for one station, the site
+(in the gateway's key names) and its scheduled passes with satellite, AOS, LOS, duration, peak
+elevation, AOS and LOS azimuth, and priority. It is named in Ma'at's namespace and not the
+gateway's, because the gateway has not adopted it. **Open for the owner (O-15):** whether the
+gateway should read this document as it is, or define its own and have Ma'at follow.
+**Verification:** unit tests of both exports on a hand-built plan (order, fields, the passes
+left out and why, transmitter validation), and the real binary on the example files with the
+exact JSON expected.
+
+### D-027 — A warning for old element sets (closes O-8)
+**Decision:** `maat plan` warns, and still plans, when any satellite's element set is more than
+14 days from the search window, measured to whichever end of the search is further from the
+epoch. One line, naming how many satellites and the furthest.
+**Why warn and not refuse:** an old element set gives a worse plan, not a meaningless one, and
+the person may have nothing newer.
+**Why 14 days:** a rule of thumb. Along-track error in a low-orbit two-line element set grows by
+roughly a kilometre or more a day, which moves AOS and LOS by a growing fraction of a second and
+then by seconds. **This figure is not measured by Ma'at**, and it is the same for every orbit,
+which is too lenient for a low, draggy orbit and too strict for a high one.
+**Not done:** nothing in the plan itself changes with element age. Windows are not widened and
+no confidence is attached to a pass.
+
+### D-028 — The name is Ma'at
+**Decision (owner, 2026-11-15: "lets set it as the official name"):** the project is named
+Ma'at. It is no longer a working name. **Closes O-1.**
+**What carries the name:** the repository (`IsomorphicAlgo/Ma-at`), the three crates
+(`maat-flight`, `maat-ground`, `maat-cli`), the `maat` command, the `MAAT-xxx` reason codes and
+the `maat.contact-plan/1` and `maat.station-schedule/1` document layouts. Nothing had to be
+renamed.
+**On crates.io (seen 2026-11-15):** `maat-flight`, `maat-ground` and `maat-cli` are published at
+0.2.0 with this repository as their source, so the three names are held. Earlier entries in
+this file and in the changelog said nothing had been published; they are corrected.
+**One thing to know:** the bare name `maat` on crates.io belongs to an unrelated project, a
+programming language. Ma'at therefore has no umbrella crate called `maat`, and
+`cargo install maat-cli` installs a command called `maat` that could collide with a command of
+the same name from that project if both are installed.
 
 ## Open decisions
 
 | # | Question | Needed by |
 |---|---|---|
-| O-1 | **Final name.** The repository is `IsomorphicAlgo/Ma-at`. `maat` is taken on crates.io; `maat-flight`, `maat-ground` and `maat-cli` were free on 2026-11-14. | First publish |
+| O-1 | ~~Final name.~~ **Resolved:** Ma'at (D-028). | — |
 | O-2 | ~~OMM input.~~ **Resolved:** Ephemerust 1.2 (D-010). | — |
 | O-3 | ~~Fixed-size storage for the scheduler.~~ **Resolved:** caller-provided slices (D-016). | — |
 | O-4 | ~~Serialization of flight types.~~ **Resolved:** JSON is built on the ground; flight types stay free of `serde` (D-018). | — |
 | O-5 | ~~Priority ties.~~ **Resolved:** longer, then earlier, with its own code `MAAT-107` (D-016). | — |
-| O-6 | ~~Turnaround between passes.~~ **Resolved for now:** a fixed time per station (D-016). Pointing-dependent turnaround is still open. | Later |
+| O-6 | ~~Turnaround between passes.~~ **Resolved:** a fixed time per station (D-016) plus the time to turn the antenna between the two passes (D-020). | — |
 | O-7 | ~~Minimum pass length and data need.~~ **Resolved:** `SatelliteRequest` in the flight crate (D-016). | — |
-| O-8 | **Element-set age.** Whether the survey should warn, or refuse, when the search is far from an element set's epoch. Not done in Stage 3. | Stage 4 |
-| O-10 | **What priority means in the optimal scheduler.** It is a weight (`priority + 1` per second); greedy treats it as a strict rank (D-017). The owner may prefer a different weighting, or a strict-rank objective. | Owner's call |
-| O-11 | **A time limit for the optimal scheduler.** `microlp` has none. A limit would need a different solver or a search of Ma'at's own. | Before heavy use |
+| O-8 | ~~Element-set age.~~ **Resolved:** `maat plan` warns beyond 14 days (D-027). Open: a measured, orbit-dependent threshold. | — |
+| O-10 | ~~What priority means in the optimal scheduler.~~ **Resolved:** a weight in optimal, a strict rank in greedy; accepted by the owner (D-022). | — |
+| O-11 | ~~A time limit for the optimal scheduler.~~ **Resolved:** `PlanOptions::optimal_time_limit`, default 60 s (D-021). | — |
 | O-12 | **Verifying an uplinked plan onboard.** A flight function that checks a plan made on the ground against the same rules before it is used. | Later |
-| O-9 | **Station file format** for the CLI (TOML, JSON or CSV), and loading many TLEs from one file (Ephemerust has `Omm::parse_all` but no TLE counterpart). | Stage 4 |
+| O-9 | ~~Station file format and multi-TLE loading.~~ **Resolved:** TOML (D-024); `satellites_from_tle` (D-025). | — |
+| O-13 | ~~A floor per satellite in the optimal plan.~~ **Resolved:** built as an option (D-023). | — |
+| O-15 | **The Chronus Gateway side of the station schedule.** The gateway has no schedule input (D-026). Should it read `maat.station-schedule/1` as it is, or define its own format for Ma'at to follow? | Owner, when the gateway's pass view is built |
+| O-16 | **Send the SatNOGS export to the network once**, on a station the owner may schedule on, to learn which of the network's own rules a plan must respect (D-026). | Owner |
+| O-14 | **A fuller mount model.** Acceleration, cable-wrap limits and zenith keyhole in the time to turn between passes (D-020 assumes constant rates and the short way round). | Later |
 
 ---
 
@@ -392,38 +631,58 @@ in `maat-ground` requires every code to have its own guidance text.
 | Lints and docs clean | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo doc -D warnings` | met |
 | Owner sign-off | "Signed off stage 1" | given |
 
-### Stage 2 — Scheduler
+### Stage 2 — Scheduler: **approved by the owner, 2026-11-15**
 
 | Criterion | Evidence | State |
 |---|---|---|
 | Greedy priority scheduler, flight-safe | `maat_flight::schedule_greedy`: `no_std`, no allocation, no dependencies, panic lints clean, bounded run time (D-016) | met |
 | Optimal scheduler, ILP via `good_lp`, ground only | `Scheduler::Optimal` (D-017) | met |
 | Station conflicts | `MAAT-101`, `107`, `108`; one `conflict` function for both schedulers | met |
+| Time to turn the antenna between passes (added at the owner's request) | `Pointing` on windows, `SlewRates` on station rules, `StationRule::gap_needed` (D-020) | met, with the mount model's limits stated in D-020 |
+| A time limit for the optimal scheduler (added at the owner's request) | `PlanOptions`, `plan_contacts_with`, `ContactPlan::optimality`, `time_until_first_pass` (D-021) | met |
 | Minimum pass length | `SatelliteRequest::with_min_contact`, `MAAT-103` | met |
 | Per-satellite data needs | `SatelliteRequest::with_need`, `MAAT-104`; surplus passes are not scheduled | met |
 | Greedy plans are sound | 400 random problems checked by an independent verifier; every outcome code exercised | met |
 | Optimal plans are optimal | Equal to exhaustive search on 300 problems of up to 16 windows | met, for small problems |
-| Optimal is never worse than greedy | 60 random problems of up to 200 windows, and a week of real orbits | met |
+| Optimal is never worse than greedy | By construction since D-021 (starts from, and falls back to, the greedy plan); tested on 60 random problems of up to 200 windows, a week of real orbits, and with no solving time at all | met, for total value; **not per satellite** (O-13) |
 | Ground greedy is the flight scheduler | End-to-end test compares the plan with `schedule_greedy` on a fixed array, decision for decision | met |
 | Bare-metal build still holds | Flight dependency tree is one line; host `no_std` build passes | met on host; **bare-metal build awaits CI** |
-| Owner sign-off | | **pending** |
+| Owner sign-off | "I sign off on 2 and 3" | given |
 
-### Stage 3 — Explainable output
+### Stage 3 — Explainable output: **approved by the owner, 2026-11-15**
 
 | Criterion | Evidence | State |
 |---|---|---|
 | Every scheduled or rejected pass says why | One `PlanEntry` per pass found, each with a `MAAT-xxx` code and a detail sentence; tested on every entry of both schedulers' plans | met |
-| Stable codes | Sixteen codes in the frozen list; numbers and identifiers guarded by test | met |
+| Stable codes | Seventeen codes in the frozen list; numbers and identifiers guarded by test | met |
 | The plan's example sentence | "dropped: overlaps a higher-priority pass at the same station" is `MAAT-101`, word for word | met |
 | Reasons are true, not just present | Blockers verified to be scheduled and to conflict; details checked against exact expected text | met |
 | Output for people and for programs | `ContactPlan::to_text`, `ContactPlan::to_json` (`maat.contact-plan/1`) | met |
 | Guidance for every code | `guidance`, `maat explain`; a test requires each code to have its own text | met |
-| Tests green | 326 passing: 247 unit, 53 integration, 26 doctests, on Rust 1.97 (Linux) | met here; **not yet run on Windows or 1.89** |
-| Tests catch mistakes | 20 deliberate faults in the schedulers and the plan each failed at least one test (one needed a new test first) | met |
+| Tests green | 385 passing: 296 unit, 55 integration, 34 doctests, on Rust 1.97 (Linux). Run on Windows by the owner on 2026-11-15: the run reached and passed its last target (15 ground doctests), which `cargo test` does only when every earlier target passed, and the `contact_plan` example printed the same plan, line for line | met on Linux and Windows; **not yet run on 1.89** |
+| Tests catch mistakes | 20 deliberate faults in the schedulers and the plan each failed at least one test (one needed a new test first). For turning time and the time limit, 23 more: 20 caught, 1 caught after a test was added, 2 not caught and explained in D-021 | met |
 | Lints and docs clean | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo doc -D warnings` | met |
-| Owner sign-off | | **pending** |
+| Owner sign-off | "I sign off on 2 and 3" | given |
 
 ---
+
+
+### Stage 4 — Plug-ins: **approved by the owner, 2026-11-15**
+
+| Deliverable | Evidence | State |
+|---|---|---|
+| Full CLI | `maat plan`: catalog (OMM or TLE) and TOML station/request files in; text, JSON, SatNOGS or station schedule out (D-024) | met |
+| Station file format | TOML, owner's choice; unknown keys are errors with their line (D-024) | met |
+| SatNOGS-compatible format | `satnogs_schedule`: the four fields of the network's new-observation request (D-026) | met as a format; **never sent to the network** (O-16) |
+| Chronus export | `station_schedule`, `maat.station-schedule/1` (D-026) | met as Ma'at's side only; **the gateway has no schedule input to read it** (O-15) |
+| Multi-TLE catalogs | `satellites_from_tle`, `satellites_from_catalog` (D-025) | met |
+| Element-age warning (O-8) | `maat plan` warns beyond 14 days (D-027) | met; the threshold is a rule of thumb |
+| Per-satellite floor (added at the owner's request) | `PlanOptions::with_satellite_floor`, `--floor` (D-023) | met; costs the whole gain on the example week |
+| Errors explain themselves | Every refused file or option names the file, the line or the option, and the fix where there is one; each has a test | met |
+| Tests green | 471 passing: 356 unit, 78 integration, 37 doctests, on Rust 1.97 (Linux). Run on Windows by the owner on 2026-11-15: the run reached its last target, the ground doctests, which `cargo test` does only when every earlier target passed, and those include the 22 tests that run the real `maat` binary on files; the result line of that last target was not in what was shared. The `contact_plan` example printed the same output as on Linux, line for line, including the per-satellite table | met on Linux; on Windows as described; **not yet run on 1.89** |
+| Tests catch mistakes | 37 deliberate faults in the floor, the exports, the catalog loader and the CLI: 36 caught, 1 not caught and explained in D-025 | met |
+| No new dependency in the libraries | `toml` and `serde` are in `maat-cli` only; `maat-flight` still has none | met |
+| Owner sign-off | "Approve stage 4" | given |
 
 ## Attribution
 
