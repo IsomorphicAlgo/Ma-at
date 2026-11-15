@@ -1,0 +1,41 @@
+[workspace]
+# Edition 2024 default: MSRV-aware resolver, so dependency selection respects `rust-version`.
+resolver = "3"
+members = [
+    "crates/maat-flight",
+    "crates/maat-ground",
+    "crates/maat-cli",
+]
+
+# Shared metadata. Member crates opt in with `field.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV: matches Ephemerust and Chronus Gateway. Raising it is a minor-version change.
+rust-version = "1.89"
+license = "MIT"
+authors = ["Michael Hansen"]
+repository = "https://github.com/IsomorphicAlgo/Ma-at"
+
+[workspace.dependencies]
+# The vehicle layer. `maat-ground` re-exports it as `maat_ground::flight`.
+maat-flight = { path = "crates/maat-flight", version = "0.1.0" }
+maat-ground = { path = "crates/maat-ground", version = "0.1.0" }
+
+# --- Human layer only. None of these may appear in `maat-flight` (see Methodology D-001). ---
+
+# Astrodynamics backend: OMM/TLE element sets and pass prediction (SGP4 via the `sgp4` crate).
+# 1.2 is the floor: it adds OMM input and `Propagator::predict_passes`, which lets one satellite
+# be checked against many stations with a single SGP4 initialization (Methodology D-010).
+# `default-features = false` skips its CLI (clap/env_logger).
+ephemerust = { version = "1.2.1", default-features = false }
+# Calendar time at the ground boundary. Ephemerust exposes `chrono` types in its public API.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"

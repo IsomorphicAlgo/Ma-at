@@ -1,0 +1,19 @@
+[package]
+name = "maat-flight"
+description = "Vehicle-layer core of the Ma'at contact scheduler: no_std, heap-free, integer-only contact-window types and stable reason codes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["satellite", "scheduling", "no-std", "ground-station", "contact-plan"]
+categories = ["aerospace", "no-std", "no-std::no-alloc", "embedded"]
+
+# Intentionally empty, and it stays that way: the flight crate depends on `core` and nothing else.
+# CI fails if a dependency is ever added here (see `.github/workflows/ci.yml`, job `no-std`).
+[dependencies]
+
+[lints]
+workspace = true

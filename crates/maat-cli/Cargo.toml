@@ -1,0 +1,23 @@
+[package]
+name = "maat-cli"
+description = "Command-line front end for the Ma'at contact scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["satellite", "scheduling", "ground-station", "contact-plan", "cli"]
+categories = ["aerospace", "command-line-utilities"]
+
+# The installed command is `maat`.
+[[bin]]
+name = "maat"
+path = "src/main.rs"
+
+[dependencies]
+maat-ground.workspace = true
+
+[lints]
+workspace = true

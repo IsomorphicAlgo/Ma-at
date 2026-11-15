@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Local-only governance / agent instructions and planning notes (not distributed via git)
+AGENTS.md
+agents.md
+PLANS.md
+
+# Local environment / secrets (do not commit)
+.env
+.env.*
+*.local.toml
+credentials.txt
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.code-workspace

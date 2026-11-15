@@ -1,0 +1,21 @@
+[package]
+name = "maat-ground"
+description = "Human-layer companion to the Ma'at contact scheduler: ground stations, calendar time and Ephemerust pass prediction feeding the no_std flight core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["satellite", "scheduling", "ground-station", "contact-plan", "sgp4"]
+categories = ["aerospace", "science"]
+
+[dependencies]
+maat-flight.workspace = true
+ephemerust.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
