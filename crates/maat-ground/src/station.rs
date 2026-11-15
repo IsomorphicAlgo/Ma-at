@@ -1,7 +1,7 @@
 //! Ground stations.
 
 use ephemerust::ObserverLocation;
-use maat_flight::StationId;
+use maat_flight::{Seconds, StationId, StationRule};
 
 use crate::error::GroundError;
 
@@ -73,6 +73,7 @@ pub struct GroundStation {
     site: StationSite,
     min_elevation_deg: f64,
     slew_limits: Option<SlewLimits>,
+    turnaround: Seconds,
 }
 
 /// The inclusive range a station field must fall in, with the text shown when it does not.
@@ -179,7 +180,30 @@ impl GroundStation {
             site,
             min_elevation_deg,
             slew_limits: None,
+            turnaround: Seconds::ZERO,
         })
+    }
+
+    /// Returns the station with a turnaround time: how long it needs between the end of one
+    /// pass and the start of the next, to re-point the antenna and reconfigure the radio.
+    ///
+    /// The schedulers will not place two passes at this station closer together than this. A
+    /// new station has no turnaround time.
+    ///
+    /// ```
+    /// use maat_ground::flight::{Seconds, StationId};
+    /// use maat_ground::{GroundStation, StationSite};
+    ///
+    /// let site = StationSite { latitude_deg: 47.6062, longitude_deg: -122.3321, altitude_m: 50.0 };
+    /// let station = GroundStation::new(StationId::new(1), "Seattle", site, 10.0)?
+    ///     .with_turnaround(Seconds::new(90));
+    /// assert_eq!(station.turnaround(), Seconds::new(90));
+    /// # Ok::<(), maat_ground::GroundError>(())
+    /// ```
+    #[must_use]
+    pub fn with_turnaround(mut self, turnaround: Seconds) -> Self {
+        self.turnaround = turnaround;
+        self
     }
 
     /// Returns the station with slew limits set, after checking them.
@@ -237,6 +261,18 @@ impl GroundStation {
     #[must_use]
     pub fn slew_limits(&self) -> Option<SlewLimits> {
         self.slew_limits
+    }
+
+    /// The time the station needs between passes.
+    #[must_use]
+    pub fn turnaround(&self) -> Seconds {
+        self.turnaround
+    }
+
+    /// The station's scheduling rule, in the form the flight scheduler takes.
+    #[must_use]
+    pub fn rule(&self) -> StationRule {
+        StationRule::new(self.id, self.turnaround)
     }
 
     /// The station's position in the form Ephemerust's pass prediction takes.
@@ -376,6 +412,28 @@ mod tests {
                 Err(GroundError::EmptyStationName { station }) if station == ID
             ));
         }
+    }
+
+    // --- Turnaround ----------------------------------------------------------------------------
+
+    #[test]
+    fn a_new_station_needs_no_turnaround() {
+        let station = GroundStation::new(ID, "Test", SEATTLE, 10.0).unwrap();
+        assert_eq!(station.turnaround(), Seconds::ZERO);
+        assert_eq!(station.rule(), StationRule::new(ID, Seconds::ZERO));
+    }
+
+    #[test]
+    fn turnaround_is_kept_and_reaches_the_flight_rule() {
+        let station = GroundStation::new(ID, "Test", SEATTLE, 10.0)
+            .unwrap()
+            .with_turnaround(Seconds::new(90));
+        assert_eq!(station.turnaround(), Seconds::new(90));
+        assert_eq!(station.rule().station(), ID);
+        assert_eq!(station.rule().turnaround(), Seconds::new(90));
+        // The rest of the station is untouched.
+        assert_eq!(station.site(), SEATTLE);
+        assert_eq!(station.slew_limits(), None);
     }
 
     // --- Slew limits ---------------------------------------------------------------------------

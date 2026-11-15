@@ -17,9 +17,10 @@
 )]
 //! # maat-flight
 //!
-//! The **vehicle layer** of the Ma'at contact scheduler: the types a scheduler works on and the
-//! stable reason codes that explain its decisions. Everything here is written to be suitable for
-//! running onboard a spacecraft as well as on the ground.
+//! The **vehicle layer** of the Ma'at contact scheduler: the types a scheduler works on, a
+//! greedy scheduler ([`schedule_greedy`]) and the stable reason codes that explain its decisions.
+//! Everything here is written to be suitable for running onboard a spacecraft as well as on the
+//! ground.
 //!
 //! ## What "flight-suitable" means here
 //!
@@ -71,10 +72,15 @@
 
 pub mod ids;
 pub mod reason;
+pub mod schedule;
 pub mod time;
 pub mod window;
 
 pub use ids::{Priority, SatelliteId, StationId};
 pub use reason::{ReasonClass, ReasonCode};
+pub use schedule::{
+    Conflict, Decision, SatelliteRequest, ScheduleError, ScheduleSummary, StationRule,
+    schedule_greedy,
+};
 pub use time::{Seconds, Timestamp};
 pub use window::{ContactWindow, Elevation, WindowError};

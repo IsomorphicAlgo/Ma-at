@@ -29,7 +29,30 @@ fn codes_prints_the_reason_table_and_succeeds() {
     assert!(text.contains("MAAT-001  accepted"));
     assert!(text.contains("MAAT-201  invalid input"));
     assert!(text.contains("MAAT-301  resource limit"));
+    assert!(text.contains("MAAT-109  rejected"));
     assert!(stderr(&output).is_empty());
+}
+
+#[test]
+fn explain_prints_the_code_its_summary_and_guidance() {
+    let output = maat(&["explain", "maat-105"]);
+    assert!(output.status.success());
+    let text = stdout(&output);
+    assert!(text.starts_with("MAAT-105  (rejected)\n"), "{text}");
+    assert!(
+        text.contains("faster antenna slew than the station allows"),
+        "{text}"
+    );
+    assert!(text.contains("slew limit"), "{text}");
+    assert!(stderr(&output).is_empty());
+}
+
+#[test]
+fn explain_with_an_unknown_code_fails_with_status_2() {
+    let output = maat(&["explain", "MAAT-999"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("'MAAT-999' is not a MAAT reason code"));
 }
 
 #[test]

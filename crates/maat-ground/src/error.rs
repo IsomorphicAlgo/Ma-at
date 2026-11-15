@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use ephemerust::AstroError;
-use maat_flight::{ReasonCode, SatelliteId, StationId, WindowError};
+use maat_flight::{ReasonCode, SatelliteId, ScheduleError, StationId, WindowError};
 use thiserror::Error;
 
 /// Everything that can go wrong in the ground layer.
@@ -18,6 +18,20 @@ pub enum GroundError {
     /// The flight layer refused a contact window. The message starts with its `MAAT-2xx` code.
     #[error(transparent)]
     Window(#[from] WindowError),
+
+    /// The scheduler refused the request. The message starts with its `MAAT` code.
+    #[error(transparent)]
+    Schedule(#[from] ScheduleError),
+
+    /// The optimal scheduler's solver did not return a usable plan.
+    #[error(
+        "the optimal scheduler could not produce a plan: {message}; the greedy scheduler does \
+         not depend on the solver and can be used instead"
+    )]
+    Solver {
+        /// What went wrong, as reported by the solver or by the checks on its answer.
+        message: String,
+    },
 
     /// A ground station was given a number that is not finite or is outside its valid range.
     #[error("invalid ground station {station} \"{name}\": {field} is {value}, expected {expected}")]
@@ -180,9 +194,11 @@ impl GroundError {
     pub fn reason(&self) -> Option<ReasonCode> {
         match self {
             Self::Window(error) => Some(error.reason()),
+            Self::Schedule(error) => Some(error.reason()),
             Self::InvalidElevation { .. } => Some(ReasonCode::ElevationOutOfRange),
             Self::InvalidStation { .. }
             | Self::EmptyStationName { .. }
+            | Self::Solver { .. }
             | Self::TimeOutOfRange { .. }
             | Self::Catalog { .. }
             | Self::Elements { .. }

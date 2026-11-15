@@ -6,6 +6,66 @@ contain breaking changes. Until 1.0 there is one minor version per completed sta
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
+Stages 2 and 3: the schedulers and explained contact plans. Not published to crates.io. Version
+0.3.0 was not issued, because the two stages were built together.
+
+### Added — Stage 2: scheduling
+
+- **`maat-flight`: the greedy scheduler.** `schedule_greedy(windows, requests, stations,
+  decisions)` considers windows best first (priority, then length, then AOS) and writes one
+  `Decision` per window into a slice the caller provides. No allocation, no dependencies, and a
+  run time proportional to the square of the number of windows.
+  - `SatelliteRequest`: priority, minimum contact and contact need for one satellite.
+  - `StationRule`: a station's turnaround time between passes.
+  - `Decision`, `ScheduleSummary`, `ScheduleError`.
+  - `schedule::conflict`, `rank`, `screen`, `validate` and `turnaround_for`: the rules, exposed
+    so the optimal scheduler and the tests use the same ones.
+- **`maat-ground`: the optimal scheduler.** `Scheduler::Optimal` solves the same problem as an
+  integer linear program (through `good_lp`, with the pure-Rust `microlp` solver) and returns
+  the plan of greatest value: `priority + 1` per useful second of contact.
+- **`GroundStation::with_turnaround`**, `turnaround` and `rule`.
+- **Six reason codes**: `MAAT-106` (no request), `MAAT-107` (lost a tie), `MAAT-108`
+  (turnaround), `MAAT-109` (outweighed in the optimal plan), `MAAT-204` (duplicate request) and
+  `MAAT-205` (duplicate station rule). `MAAT-101`, `102`, `104` and `301`, reserved since Stage
+  0, are now emitted.
+- `GroundError::Schedule` and `GroundError::Solver`.
+
+### Added — Stage 3: explained output
+
+- **`maat-ground`: the contact plan.** `plan_contacts(survey, satellites, stations, requests,
+  scheduler)` returns a `ContactPlan` with one `PlanEntry` for every pass that was found, each
+  with its reason code, a detail sentence naming the satellites, stations, times and numbers
+  involved, and for a pass that lost to another, which one. Summaries per satellite
+  (`SatelliteSummary`, including whether its need was met) and per station (`StationSummary`).
+- **`ContactPlan::to_text`**: the schedule, every unscheduled pass with its reason, and the
+  summaries, for a person.
+- **`ContactPlan::to_json`** and `to_json_value`: the same plan for a program, in a layout named
+  `maat.contact-plan/1` (`JSON_SCHEMA`).
+- **`ContactPlan::value`**: one number on which a greedy and an optimal plan can be compared.
+- **`guidance(reason)`**: a paragraph for each reason code on what it means and what would
+  change the outcome. `parse_reason_code` reads a code as a person would type it.
+- **`maat-cli`: `maat explain <CODE>`.**
+- Example `contact_plan`: a printed plan, and greedy against optimal over a week.
+
+### Changed
+
+- New dependencies in `maat-ground` only: `good_lp` (with `microlp`) and `serde_json`. The
+  flight crate still has none.
+- The wording of the `MAAT-1xx` class: "a valid pass lost to a scheduling rule or a station
+  limit".
+
+### Tests
+
+- 326 in total (247 unit, 53 integration, 26 doctests).
+- Greedy plans: 400 random problems checked by a verifier written independently of the
+  scheduler.
+- Optimal plans: equal to exhaustive search on 300 random problems of up to 16 windows, and
+  never worth less than the greedy plan on larger ones.
+- End to end: the ground's greedy plan matches the flight scheduler run on a fixed-size array,
+  decision for decision.
+
 ## [0.2.0] - 2026-11-14
 
 Stage 1: contact windows. Not published to crates.io.

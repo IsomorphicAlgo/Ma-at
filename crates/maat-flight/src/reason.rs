@@ -159,6 +159,22 @@ reason_codes! {
     SlewRateExceeded = 105, "MAAT-105", Rejected,
         "dropped: tracking the pass needs a faster antenna slew than the station allows";
 
+    /// No contact request names this satellite, so the scheduler has nothing to schedule it for.
+    NoRequest = 106, "MAAT-106", Rejected,
+        "dropped: no contact request covers this satellite";
+
+    /// The station is committed to an overlapping pass of equal priority that won the tie-break.
+    StationTieLost = 107, "MAAT-107", Rejected,
+        "dropped: lost a tie with an equal-priority pass at the same station";
+
+    /// The pass does not overlap another at the station but leaves too little time to re-point.
+    StationTurnaround = 108, "MAAT-108", Rejected,
+        "dropped: too close to another pass for the station to re-point in time";
+
+    /// The optimal scheduler kept a conflicting pass because the plan as a whole is worth more.
+    OutweighedByPlan = 109, "MAAT-109", Rejected,
+        "dropped: conflicts with a pass the optimizer kept for a better overall plan";
+
     /// Loss of signal is not later than acquisition of signal, so the window has no duration.
     LosNotAfterAos = 201, "MAAT-201", InvalidInput,
         "invalid window: loss of signal is not later than acquisition of signal";
@@ -170,6 +186,14 @@ reason_codes! {
     /// The maximum elevation is not between the horizon and the zenith.
     ElevationOutOfRange = 203, "MAAT-203", InvalidInput,
         "invalid window: the maximum elevation is outside 0 to 90 degrees";
+
+    /// Two contact requests name the same satellite.
+    DuplicateRequest = 204, "MAAT-204", InvalidInput,
+        "invalid request: a satellite has more than one contact request";
+
+    /// Two station rules name the same station.
+    DuplicateStationRule = 205, "MAAT-205", InvalidInput,
+        "invalid request: a station has more than one rule";
 
     /// A fixed-size buffer was full, so the pass could not be evaluated.
     CapacityExceeded = 301, "MAAT-301", ResourceLimit,
@@ -211,9 +235,15 @@ mod tests {
         (ReasonCode::BelowMinimumDuration, 103, "MAAT-103"),
         (ReasonCode::NeedAlreadyMet, 104, "MAAT-104"),
         (ReasonCode::SlewRateExceeded, 105, "MAAT-105"),
+        (ReasonCode::NoRequest, 106, "MAAT-106"),
+        (ReasonCode::StationTieLost, 107, "MAAT-107"),
+        (ReasonCode::StationTurnaround, 108, "MAAT-108"),
+        (ReasonCode::OutweighedByPlan, 109, "MAAT-109"),
         (ReasonCode::LosNotAfterAos, 201, "MAAT-201"),
         (ReasonCode::WindowTooLong, 202, "MAAT-202"),
         (ReasonCode::ElevationOutOfRange, 203, "MAAT-203"),
+        (ReasonCode::DuplicateRequest, 204, "MAAT-204"),
+        (ReasonCode::DuplicateStationRule, 205, "MAAT-205"),
         (ReasonCode::CapacityExceeded, 301, "MAAT-301"),
     ];
 

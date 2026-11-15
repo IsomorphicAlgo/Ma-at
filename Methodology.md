@@ -4,9 +4,11 @@ A living record of **why** the project is built the way it is: major decisions, 
 the reasoning behind them. Append new entries as decisions are made. Do not silently rewrite
 history; mark an entry superseded or amended instead.
 
-> **Status (2026-11-14): version 0.2.0. Stage 0 approved. Stage 1 built, awaiting owner sign-off.** Satellites
-> load from OMM or TLE, and the window survey lists every contact opportunity for N satellites
-> over M stations. Stage 2 (the scheduler) has not started.
+> **Status (2026-11-15): version 0.4.0. Stages 0 and 1 approved. Stages 2 and 3 built together at
+> the owner's direction, awaiting sign-off.** Ma'at schedules contact windows with a greedy
+> scheduler in the flight crate or an optimal one on the ground, and every pass in the resulting
+> plan carries a reason code and a detail sentence. Stage 4 (exports and the full CLI) has not
+> started.
 
 ---
 
@@ -85,9 +87,9 @@ a plan, whichever layer decides it. `MAAT-105` (slew rate) is decided on the gro
 window survey and is in the catalogue because it explains a missing pass. Ground-only
 *configuration and input* errors (a bad station, an unreadable catalog, a date out of range) are
 ordinary `GroundError`s without a code.
-**Trade-off:** `MAAT-101`, `102`, `104` and `301` are defined before the scheduler that will emit
-them. They come directly from the Stage 2 requirements in the plan. If Stage 2 shows one is
-wrong, it should be corrected before the first release, while nothing is published.
+**Trade-off (resolved in Stage 2):** `MAAT-101`, `102`, `104` and `301` were defined before the
+scheduler that emits them. Stage 2 kept all four with their meanings unchanged and added six more
+(D-019). Every code in the catalogue is now produced by code and covered by a test.
 
 ### D-007 — No panicking constructs in flight library code
 **Decision:** `maat-flight` denies `clippy::unwrap_used`, `expect_used`, `panic`,
@@ -220,6 +222,122 @@ been emitted. Calling that 1.0 would promise a stability the project has not ear
 **Publishing:** Nothing is on crates.io yet. A version here records a state of the repository; a
 git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itself is taken there
 (O-1).
+**0.3.0 was skipped:** Stages 2 and 3 were built together at the owner's direction, so the
+repository went from 0.2.0 to 0.4.0. The changelog keeps the two stages apart inside 0.4.0.
+
+### D-016 — The greedy scheduler: best first, on the caller's memory
+**Decision:** `maat_flight::schedule_greedy(windows, requests, stations, decisions)` considers
+windows best first and schedules each one unless something already scheduled rules it out. It
+writes one `Decision` per window into a slice the caller provides and keeps no state of its own.
+This settles four open questions:
+- **O-3, storage:** caller-provided slices. The flight crate stays free of dependencies and of
+  any fixed capacity of its own; an onboard caller sizes the array, a ground caller uses a `Vec`.
+  A slice that is too short is refused whole with `MAAT-301`, and nothing is written.
+- **O-5, ties:** the ranking is priority, then the longer pass, then the earlier AOS, then the
+  lower station number, the lower satellite number, and last the position in the input. It is a
+  total order, so the plan does not depend on input order or processor. A pass that loses to an
+  equal priority is told so with its own code (`MAAT-107`), because "a higher-priority pass" would
+  be untrue and the remedy is different.
+- **O-6, turnaround:** one fixed time per station (`StationRule`), applied before and after
+  every scheduled pass. A pass inside the gap gets `MAAT-108`. Pointing-dependent turnaround
+  would need azimuth and elevation in `ContactWindow` and is left for later.
+- **O-7, per-satellite inputs:** `SatelliteRequest` in the flight crate holds priority, minimum
+  contact and need. A satellite with no request is not scheduled (`MAAT-106`).
+**Order of checks:** no request, too short, need met, station overlap, station turnaround,
+satellite overlap. A met need is reported ahead of a conflict because freeing the station would
+not get the pass scheduled.
+**Why selection and not a sort:** each round scans the windows for the best one still pending,
+then scans them again to judge it. That is `n²` steps with no scratch memory, no recursion and a
+run time that depends only on the counts `n`, `r` and `s`, which is what "deterministic run time"
+asks for. Measured (release build, one desktop core): 1000 windows in 1 to 3 ms, 3000 in about
+25 ms.
+**Assumptions, stated in the docs:** one pass at a time per station, one station at a time per
+satellite, and a pass is used whole.
+**Verification:** 52 unit tests, which pin down each rule and the boundary of every comparison. One
+of them builds 400 crowded problems and checks each plan with a verifier written
+independently of the scheduler: no two scheduled passes conflict, and every stated reason is
+true (the named blocker is scheduled, really conflicts, and really outranks). The same test
+requires every outcome code to come up at least 20 times. Another shuffles the input and requires
+the same plan.
+**Found by the tests:** a request with no limit stores its need as `Seconds::MAX`, and the running
+total of granted contact saturates at the same value, so an unlimited need could read as "met".
+`SatelliteRequest::is_met_by` now treats an unlimited need as never met.
+
+### D-017 — The optimal scheduler: an integer program with clique constraints
+**Decision:** `Scheduler::Optimal` in `maat-ground` models the same rules as an integer linear
+program through `good_lp`, solved by `microlp`.
+**Objective:** maximize, over satellites, `(priority + 1) × useful contact seconds`, where useful
+contact is contact up to the satellite's need. **This makes priority a weight, where the greedy
+scheduler makes it a strict rank.** The two agree when priorities are equal. A strict-rank
+objective was considered and set aside: it needs either weights that differ by many orders of
+magnitude, which breaks floating-point solvers, or one solve per priority level. The difference is
+stated in the README, the module docs and the guidance for `MAAT-109`.
+**Constraints as cliques:** for each instant a pass begins, at most one of the passes in progress
+at that station (padded by its turnaround time), or for that satellite, may be chosen. A test
+confirms that two passes share a clique exactly when `maat_flight::schedule::conflict` says they
+conflict, so the model and the greedy scheduler enforce the same rules by construction.
+**Solver choice:** `microlp` is pure Rust. The workspace still builds with only a Rust toolchain,
+on Windows as on Linux, and the solver can go to WebAssembly for the Stage 5 demo. HiGHS and CBC
+are faster and have time limits but need a C++ toolchain or a system library.
+**A finding that shaped the model:** the first formulation subtracted a tiny penalty per
+scheduled pass, to stop the solver choosing passes that add nothing once a need is met. With that
+penalty a 60-window problem took 15 seconds and a 200-window problem did not finish in a minute;
+without it, 1000 windows take about 10 ms. The penalty makes the relaxed problem fractional at
+every satellite whose need binds. It was removed, and surplus passes are instead removed after
+the solve.
+**After the solve:** the answer is checked for conflicts (an error if any), surplus passes are
+removed worst first, and any usable pass left out is added best first, repeating until nothing
+changes. Neither step lowers the value. They guarantee that every unscheduled candidate has a
+concrete reason: its need is met (`MAAT-104`) or it conflicts with a scheduled pass (`MAAT-109`,
+naming that pass).
+**Verification:**
+- 300 random problems of 4 to 16 windows: the plan's value equals the best found by trying every
+  subset of windows, to 1e-6. Greedy is strictly beaten in at least 20 of them.
+- 60 random problems of 40 to 200 windows: every plan is conflict-free with true reasons, and is
+  worth at least as much as the greedy plan.
+- A week of five synthetic satellites over four stations (597 windows): worth 2.3 % more than
+  the greedy plan.
+**Measured run time (release build, one desktop core):** 100 windows in under 5 ms, 1000 in 8 to
+16 ms, 3000 in 0.1 to 0.3 s.
+**Limits:** no bound on run time and no time limit in the solver; optimality is proven only up to
+16 windows; ground only.
+
+### D-018 — The contact plan: one entry per pass, explained at three levels
+**Decision:** `plan_contacts` returns a `ContactPlan` with one `PlanEntry` for every pass the
+survey found: those the scheduler decided and those the survey had already turned down. Each
+entry has the reason code, a detail sentence, which stage decided it, and for a pass that lost to
+another, the position of that pass. The plan renders as text and as JSON.
+**Three levels of explanation:**
+1. the code and one-line summary, in the flight crate, stable and short enough for a downlink;
+2. the detail, built on the ground from the actual plan: names, times, priorities, seconds;
+3. the guidance (`maat_ground::guidance`, `maat explain`): what the code means and what would
+   change the outcome.
+**O-4, serialization:** JSON is built in `maat-ground` with `serde_json`. The flight types do not
+implement `serde` traits, so the flight crate keeps its empty dependency list. `serde_json` was
+already in the tree through Ephemerust.
+**JSON contract:** the layout is named `maat.contact-plan/1`. The number changes only if a field
+is removed or changes meaning. Reasons appear as an object with `code`, `number`, `class` and
+`summary`; `blocked_by` is an index into `entries`; a need of `null` means no limit.
+**Value on every plan:** the optimal scheduler's objective is computed for greedy plans too, so
+the two can be compared on one number.
+**Incomplete plans say so:** if the survey could not search a satellite/station pair, the plan
+lists it, the text report says INCOMPLETE on its fourth line, and the JSON has
+`"complete": false`.
+**Verification:** exact-text tests of each detail sentence; a golden test of the whole text
+report; JSON parsed back and compared field by field; an end-to-end test that runs the flight
+scheduler directly on a fixed-size array and requires the ground plan to match it decision for
+decision.
+
+### D-019 — Six reason codes added in Stage 2
+**Decision:** `MAAT-106` (no request), `MAAT-107` (lost a tie), `MAAT-108` (turnaround),
+`MAAT-109` (outweighed in the optimal plan), `MAAT-204` (duplicate request) and `MAAT-205`
+(duplicate station rule).
+**Why each is separate:** each has a different remedy. A tie is fixed by changing a priority; a
+turnaround conflict by checking the station's turnaround time; a missing request by adding one.
+`MAAT-109` is separate from `MAAT-101` because the optimal scheduler does not compare priorities
+pass against pass, so "a higher-priority pass" would be false.
+**Guarded by tests:** the frozen list in the flight tests now holds all sixteen codes, and a test
+in `maat-ground` requires every code to have its own guidance text.
 
 ---
 
@@ -229,12 +347,15 @@ git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itsel
 |---|---|---|
 | O-1 | **Final name.** The repository is `IsomorphicAlgo/Ma-at`. `maat` is taken on crates.io; `maat-flight`, `maat-ground` and `maat-cli` were free on 2026-11-14. | First publish |
 | O-2 | ~~OMM input.~~ **Resolved:** Ephemerust 1.2 (D-010). | — |
-| O-3 | **Fixed-size storage for the scheduler.** Caller-provided slices (`&[ContactWindow]` in, `&mut [Decision]` out), a small in-crate fixed-capacity vector, or the `heapless` crate. The first keeps the flight crate dependency-free. | Stage 2 |
-| O-4 | **Serialization of flight types.** An optional `serde` feature on `maat-flight`, or mirror types in `maat-ground`. | Stage 3 |
-| O-5 | **Priority ties.** What decides between two overlapping passes of equal priority, and whether that outcome needs its own reason code. | Stage 2 |
-| O-6 | **Turnaround between passes.** A steerable antenna needs time to turn from the end of one pass to the start of the next. Modelling it needs the azimuth and elevation at AOS and LOS, which `ContactWindow` does not carry. Either add them to the flight type (as integers) or give each station a fixed turnaround time. | Stage 2 |
-| O-7 | **Minimum pass length and data need.** Where the per-satellite inputs to the scheduler live (priority, minimum useful contact, contact time wanted). | Stage 2 |
-| O-8 | **Element-set age.** Whether the survey should warn, or refuse, when the search is far from an element set's epoch. | Stage 3 |
+| O-3 | ~~Fixed-size storage for the scheduler.~~ **Resolved:** caller-provided slices (D-016). | — |
+| O-4 | ~~Serialization of flight types.~~ **Resolved:** JSON is built on the ground; flight types stay free of `serde` (D-018). | — |
+| O-5 | ~~Priority ties.~~ **Resolved:** longer, then earlier, with its own code `MAAT-107` (D-016). | — |
+| O-6 | ~~Turnaround between passes.~~ **Resolved for now:** a fixed time per station (D-016). Pointing-dependent turnaround is still open. | Later |
+| O-7 | ~~Minimum pass length and data need.~~ **Resolved:** `SatelliteRequest` in the flight crate (D-016). | — |
+| O-8 | **Element-set age.** Whether the survey should warn, or refuse, when the search is far from an element set's epoch. Not done in Stage 3. | Stage 4 |
+| O-10 | **What priority means in the optimal scheduler.** It is a weight (`priority + 1` per second); greedy treats it as a strict rank (D-017). The owner may prefer a different weighting, or a strict-rank objective. | Owner's call |
+| O-11 | **A time limit for the optimal scheduler.** `microlp` has none. A limit would need a different solver or a search of Ma'at's own. | Before heavy use |
+| O-12 | **Verifying an uplinked plan onboard.** A flight function that checks a plan made on the ground against the same rules before it is used. | Later |
 | O-9 | **Station file format** for the CLI (TOML, JSON or CSV), and loading many TLEs from one file (Ephemerust has `Omm::parse_all` but no TLE counterpart). | Stage 4 |
 
 ---
@@ -255,7 +376,7 @@ git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itsel
 | MSRV 1.89 build | CI job `test (1.89)` | **awaiting the first CI run** |
 | Owner sign-off | "I approve stage 0" | given |
 
-### Stage 1 — Windows
+### Stage 1 — Windows: **approved by the owner, 2026-11-14**
 
 | Criterion | Evidence | State |
 |---|---|---|
@@ -269,6 +390,37 @@ git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itsel
 | Tests green | 176 passing: 125 unit, 33 integration, 18 doctests, on Rust 1.97 (Linux) | met here; **not yet run on Windows or 1.89** |
 | Tests catch mistakes | 14 deliberate faults (wrap, sort, masks, checks, sampling) each failed at least one test | met |
 | Lints and docs clean | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo doc -D warnings` | met |
+| Owner sign-off | "Signed off stage 1" | given |
+
+### Stage 2 — Scheduler
+
+| Criterion | Evidence | State |
+|---|---|---|
+| Greedy priority scheduler, flight-safe | `maat_flight::schedule_greedy`: `no_std`, no allocation, no dependencies, panic lints clean, bounded run time (D-016) | met |
+| Optimal scheduler, ILP via `good_lp`, ground only | `Scheduler::Optimal` (D-017) | met |
+| Station conflicts | `MAAT-101`, `107`, `108`; one `conflict` function for both schedulers | met |
+| Minimum pass length | `SatelliteRequest::with_min_contact`, `MAAT-103` | met |
+| Per-satellite data needs | `SatelliteRequest::with_need`, `MAAT-104`; surplus passes are not scheduled | met |
+| Greedy plans are sound | 400 random problems checked by an independent verifier; every outcome code exercised | met |
+| Optimal plans are optimal | Equal to exhaustive search on 300 problems of up to 16 windows | met, for small problems |
+| Optimal is never worse than greedy | 60 random problems of up to 200 windows, and a week of real orbits | met |
+| Ground greedy is the flight scheduler | End-to-end test compares the plan with `schedule_greedy` on a fixed array, decision for decision | met |
+| Bare-metal build still holds | Flight dependency tree is one line; host `no_std` build passes | met on host; **bare-metal build awaits CI** |
+| Owner sign-off | | **pending** |
+
+### Stage 3 — Explainable output
+
+| Criterion | Evidence | State |
+|---|---|---|
+| Every scheduled or rejected pass says why | One `PlanEntry` per pass found, each with a `MAAT-xxx` code and a detail sentence; tested on every entry of both schedulers' plans | met |
+| Stable codes | Sixteen codes in the frozen list; numbers and identifiers guarded by test | met |
+| The plan's example sentence | "dropped: overlaps a higher-priority pass at the same station" is `MAAT-101`, word for word | met |
+| Reasons are true, not just present | Blockers verified to be scheduled and to conflict; details checked against exact expected text | met |
+| Output for people and for programs | `ContactPlan::to_text`, `ContactPlan::to_json` (`maat.contact-plan/1`) | met |
+| Guidance for every code | `guidance`, `maat explain`; a test requires each code to have its own text | met |
+| Tests green | 326 passing: 247 unit, 53 integration, 26 doctests, on Rust 1.97 (Linux) | met here; **not yet run on Windows or 1.89** |
+| Tests catch mistakes | 20 deliberate faults in the schedulers and the plan each failed at least one test (one needed a new test first) | met |
+| Lints and docs clean | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo doc -D warnings` | met |
 | Owner sign-off | | **pending** |
 
 ---
@@ -278,11 +430,16 @@ git tag (`v0.2.0`) marks it. Publishing is a separate decision, and `maat` itsel
 - **Ephemerust** (the owner's astrodynamics crate) provides OMM and TLE parsing and pass
   prediction; it builds on the **`sgp4`** crate. MIT.
 - **`chrono`** (MIT/Apache-2.0) and **`thiserror`** (MIT/Apache-2.0), ground layer only.
+- **`good_lp`** (MIT) for the integer-program model and **`microlp`** (Apache-2.0), with its
+  dependencies `sprs` and `ndarray`, for solving it. Ground layer only.
+- **`serde_json`** (MIT/Apache-2.0) for JSON output. Ground layer only.
+- Interval scheduling with clique constraints is textbook integer programming; the formulation
+  here was written for this project.
 - The reference ISS two-line element set in tests and examples is public data, also used in
   Ephemerust's documentation. All other element sets in tests and examples are synthetic.
 - The azimuth-rate formula in D-012 is standard tracking geometry (line-of-sight rate divided by
   the cosine of elevation); it is used only as a test cross-check.
-- Stages 0 and 1 were drafted with AI assistance (Claude) and are subject to owner review.
+- Stages 0 to 3 were drafted with AI assistance (Claude) and are subject to owner review.
 
 ## Scope and export control
 

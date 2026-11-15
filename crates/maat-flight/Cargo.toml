@@ -1,6 +1,6 @@
 [package]
 name = "maat-flight"
-description = "Vehicle-layer core of the Ma'at contact scheduler: no_std, heap-free, integer-only contact-window types and stable reason codes"
+description = "Vehicle-layer core of the Ma'at contact scheduler: a no_std, heap-free, integer-only greedy scheduler with stable reason codes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

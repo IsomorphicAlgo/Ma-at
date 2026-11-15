@@ -17,10 +17,16 @@ It provides:
   of flight `ContactWindow`s. Passes that are found but cannot be used come back separately, each
   with a `MAAT-xxx` reason code. A satellite that cannot be propagated is reported without
   stopping the rest.
+- `plan_contacts`: a `ContactPlan` built with the greedy scheduler (the flight crate's, unchanged)
+  or the optimal one (an integer program, ground only). Every pass that was found is in the plan
+  once, with its reason code and a sentence of detail.
+- `ContactPlan::to_text` and `ContactPlan::to_json`: the plan for a person and for a program.
+- `guidance`: what each reason code means and what would change the outcome.
 - `window_from_pass` and the time conversions underneath it, which round inward so a window never
   claims contact time the pass did not have.
 
 ```text
+cargo run -p maat-ground --example contact_plan
 cargo run -p maat-ground --example window_survey
 ```
 

@@ -20,6 +20,12 @@
 //!    ([`contact_windows`]). The result is a sorted list of flight
 //!    [`ContactWindow`](flight::ContactWindow)s, plus every pass that was found but cannot be
 //!    used, each with a `MAAT-xxx` reason.
+//! 4. **Plans contacts** ([`plan_contacts`]) with the greedy scheduler from the flight crate or
+//!    the [`optimal`] one, which is an integer program and runs on the ground only.
+//! 5. **Explains the plan.** A [`ContactPlan`] has one entry for every pass that was found, with
+//!    its reason code and a sentence of detail, and renders as text
+//!    ([`ContactPlan::to_text`]) or JSON ([`ContactPlan::to_json`]). [`guidance`] says what each
+//!    code means and what would change the outcome.
 //!
 //! ## The boundary, and how values cross it
 //!
@@ -69,16 +75,27 @@
 //! ```
 
 pub mod error;
+pub mod explain;
+pub mod optimal;
+pub mod plan;
 pub mod satellite;
 pub mod station;
 pub mod survey;
 pub mod time;
 pub mod window;
 
+#[cfg(test)]
+mod testkit;
+
 /// The vehicle layer, re-exported so that ground code needs only one dependency.
 pub use maat_flight as flight;
 
 pub use error::GroundError;
+pub use explain::{guidance, parse_reason_code};
+pub use plan::{
+    ContactPlan, DecidedBy, JSON_SCHEMA, PlanEntry, SatelliteSummary, Scheduler, StationSummary,
+    plan_contacts,
+};
 pub use satellite::{Satellite, satellites_from_omm};
 pub use station::{GroundStation, SlewLimits, StationSite};
 pub use survey::{RejectedPass, SurveyFailure, WindowSurvey, contact_windows};

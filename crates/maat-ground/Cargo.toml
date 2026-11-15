@@ -1,6 +1,6 @@
 [package]
 name = "maat-ground"
-description = "Human-layer companion to the Ma'at contact scheduler: ground stations, calendar time and Ephemerust pass prediction feeding the no_std flight core"
+description = "Human layer of the Ma'at contact scheduler: OMM/TLE satellites, ground stations, contact windows, an optimal scheduler and explained contact plans"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,8 @@ maat-flight.workspace = true
 ephemerust.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
+good_lp.workspace = true
 
 [lints]
 workspace = true
