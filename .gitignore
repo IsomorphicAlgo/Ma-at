@@ -19,3 +19,6 @@ credentials.txt
 .DS_Store
 Thumbs.db
 *.code-workspace
+
+# The browser demo's WebAssembly build (demo/build.ps1 or demo/build.sh makes it).
+/demo/pkg/

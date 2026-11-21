@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ma'at contact scheduler</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="masthead">
+    <h1>Ma'at</h1>
+    <p>Which satellite gets which ground station, when, and the reason for every pass that was turned down.</p>
+    <p class="version" id="version"></p>
+  </header>
+
+  <main class="bench">
+    <form class="controls" id="controls" aria-label="What to schedule">
+      <fieldset>
+        <legend>Satellites</legend>
+        <p class="help">Higher priority wins a contested pass.</p>
+        <div id="satellites" class="picker"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Ground stations</legend>
+        <div id="stations" class="picker"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Search</legend>
+        <label class="field">Start (UTC)
+          <input type="text" id="start" inputmode="numeric" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field short">Hours
+          <input type="number" id="hours" min="1" max="168" step="1" value="6">
+        </label>
+        <p class="note" id="age-note" hidden></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Scheduler</legend>
+        <label class="choice"><input type="radio" name="scheduler" value="greedy" checked>
+          <span>Greedy <small>takes the best pass first; runs onboard</small></span></label>
+        <label class="choice"><input type="radio" name="scheduler" value="optimal">
+          <span>Optimal <small>finds the plan worth most in total</small></span></label>
+        <label class="choice sub"><input type="checkbox" id="floor" disabled>
+          <span>Give no satellite less than greedy would</span></label>
+      </fieldset>
+
+      <button type="submit" id="build">Build schedule</button>
+      <p class="problem" id="problem" role="alert" hidden></p>
+
+      <details>
+        <summary>Use your own catalog</summary>
+        <p class="help">Paste OMM (JSON, KVN, XML or CSV) or two-line element sets.</p>
+        <textarea id="catalog-text" rows="6" spellcheck="false" aria-label="Satellite catalog"></textarea>
+        <button type="button" id="load-catalog">Load catalog</button>
+      </details>
+      <details>
+        <summary>The station file this makes</summary>
+        <p class="help">The same file the <code>maat plan</code> command reads.</p>
+        <pre id="station-file"></pre>
+      </details>
+    </form>
+
+    <section class="result" aria-live="polite">
+      <p class="summary" id="summary">Loading the scheduler.</p>
+
+      <div class="timeline" id="timeline" hidden>
+        <svg id="chart" role="img" aria-labelledby="chart-title"><title id="chart-title">Contact schedule by ground station</title></svg>
+      </div>
+
+      <div class="replay" id="replay" hidden>
+        <button type="button" id="replay-button">Replay</button>
+        <label class="step">Decision <output id="step-count"></output>
+          <input type="range" id="step" min="0" max="0" value="0">
+        </label>
+      </div>
+      <p class="caption" id="caption" hidden></p>
+
+      <div class="decisions" id="decisions" hidden>
+        <h2>Every pass, and why</h2>
+        <table>
+          <thead><tr><th scope="col">AOS (UTC)</th><th scope="col">Length</th><th scope="col">Satellite</th><th scope="col">Station</th><th scope="col">Outcome</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>The page runs the same Rust code as the <code>maat</code> command, compiled to WebAssembly. Nothing is sent anywhere. The example satellites are invented.
+      <a href="https://github.com/IsomorphicAlgo/Ma-at">Source on GitHub</a></p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -6,6 +6,35 @@ contain breaking changes. Until 1.0 there is one minor version per completed sta
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-15
+
+Stage 5: the browser demo. Not published to crates.io.
+
+### Added
+
+- **`demo/`**: a static page that runs the scheduler in the browser. Satellite and station
+  pickers, a timeline by ground station, a replay of the greedy scheduler's decisions, and the
+  reason for every pass. `demo/build.ps1` and `demo/build.sh` build it; `demo/check.mjs` compares
+  the WebAssembly build's plan with the native command's.
+- **`maat-wasm`** (new crate, not published): the bridge between the page and `maat-ground`.
+  `plan_json`, `catalog_json`, `scenario_json`, `build_order`, and their `#[wasm_bindgen]`
+  exports.
+- **`maat-ground` feature `scenario`** (off by default): `maat_ground::scenario::Scenario`, the
+  TOML station-file reader, moved here from `maat-cli` so that both front ends share it.
+
+### Changed
+
+- `maat-cli` no longer depends on `toml` and `serde` directly; it enables `maat-ground`'s
+  `scenario` feature. The `maat` command behaves as before.
+- `.gitignore` ignores `demo/pkg/`, the demo's build output.
+
+### Tests
+
+- 483 in total (356 unit, 90 integration, 37 doctests).
+- The bridge is tested natively, including a replay of a week's plan in the order it reports.
+- The WebAssembly build was run in Node and in headless Chrome; see `Methodology.md` D-030 for
+  what was and was not checked.
+
 ## [0.5.0] - 2026-11-15
 
 Stage 4: files in, plans out. Not published to crates.io.

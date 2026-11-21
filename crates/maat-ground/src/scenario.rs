@@ -1,4 +1,8 @@
-//! Station and request files: TOML in, validated `maat-ground` values out.
+//! Station and request files: TOML in, validated stations and requests out.
+//!
+//! This module is behind the `scenario` feature, which is off by default, so that the library
+//! carries no file format and no `serde` or `toml` dependency unless a front end asks for it.
+//! The `maat` command and the browser demo both turn it on, and so read exactly the same files.
 //!
 //! A file holds any number of `[[station]]` and `[[request]]` tables:
 //!
@@ -28,9 +32,11 @@
 //!
 //! A key that is not listed here is an error, so a misspelt option is reported and not ignored.
 
-use maat_ground::flight::{Priority, SatelliteId, SatelliteRequest, Seconds, StationId};
-use maat_ground::{GroundStation, SatnogsIds, SlewLimits, StationSite};
+use maat_flight::{Priority, SatelliteId, SatelliteRequest, Seconds, StationId};
 use serde::Deserialize;
+
+use crate::export::SatnogsIds;
+use crate::station::{GroundStation, SlewLimits, StationSite};
 
 /// Everything read from the station and request files.
 #[derive(Debug, Default)]

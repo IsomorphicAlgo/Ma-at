@@ -196,29 +196,39 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "maat-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "maat-ground",
- "serde",
  "serde_json",
- "toml",
 ]
 
 [[package]]
 name = "maat-flight"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "maat-ground"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "ephemerust",
  "good_lp",
  "maat-flight",
+ "serde",
  "serde_json",
  "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "maat-wasm"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "maat-ground",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

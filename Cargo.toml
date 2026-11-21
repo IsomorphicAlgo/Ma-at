@@ -5,14 +5,15 @@ members = [
     "crates/maat-flight",
     "crates/maat-ground",
     "crates/maat-cli",
+    "crates/maat-wasm",
 ]
 
 # Shared metadata. Member crates opt in with `field.workspace = true`.
 [workspace.package]
 # One minor version per completed stage until 1.0 (Methodology D-015): 0.1.0 was Stage 0,
-# 0.2.0 Stage 1, 0.4.0 is Stages 2 and 3, built together, and 0.5.0 is Stage 4. Before 1.0 a
-# minor bump may break the API.
-version = "0.5.0"
+# 0.2.0 Stage 1, 0.4.0 is Stages 2 and 3, built together, 0.5.0 is Stage 4 and 0.6.0 is Stage 5.
+# Before 1.0 a minor bump may break the API.
+version = "0.6.0"
 edition = "2024"
 # MSRV: matches Ephemerust and Chronus Gateway. Raising it is a minor-version change.
 rust-version = "1.89"
@@ -22,8 +23,8 @@ repository = "https://github.com/IsomorphicAlgo/Ma-at"
 
 [workspace.dependencies]
 # The vehicle layer. `maat-ground` re-exports it as `maat_ground::flight`.
-maat-flight = { path = "crates/maat-flight", version = "0.5.0" }
-maat-ground = { path = "crates/maat-ground", version = "0.5.0" }
+maat-flight = { path = "crates/maat-flight", version = "0.6.0" }
+maat-ground = { path = "crates/maat-ground", version = "0.6.0" }
 
 # --- Human layer only. None of these may appear in `maat-flight` (see Methodology D-001). ---
 
@@ -37,7 +38,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 thiserror = "2"
 # JSON output for contact plans. Already in the tree through Ephemerust.
 serde_json = "1"
-# CLI only: reading station and request files (Methodology D-024).
+# Reading station and request files: `maat-ground`'s optional `scenario` feature (D-024, D-029).
 serde = { version = "1", features = ["derive"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # The optimal scheduler's ILP model (Methodology D-017). `microlp` is a pure-Rust solver, so the

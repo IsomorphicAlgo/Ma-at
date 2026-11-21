@@ -17,11 +17,9 @@ name = "maat"
 path = "src/main.rs"
 
 [dependencies]
-maat-ground.workspace = true
+maat-ground = { workspace = true, features = ["scenario"] }
 # `now` gives `Utc::now()` for a plan that starts at the present moment.
 chrono = { workspace = true, features = ["now"] }
-serde.workspace = true
-toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

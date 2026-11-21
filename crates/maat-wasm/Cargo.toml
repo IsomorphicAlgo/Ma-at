@@ -1,0 +1,32 @@
+[package]
+name = "maat-wasm"
+description = "WebAssembly front end for the Ma'at contact scheduler: the browser demo's bridge to maat-ground"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+# A front end for the demo page, not a library for others to build on.
+publish = false
+
+[lib]
+# `cdylib` is the WebAssembly module; `rlib` lets the same code be tested natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+maat-ground = { workspace = true, features = ["scenario"] }
+chrono.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "0.2"
+
+# The workspace forbids `unsafe`. This crate cannot use `forbid`, because `#[wasm_bindgen]`
+# generates the binding code and marks it `#[allow(unsafe_code)]`, which `forbid` refuses.
+# `deny` keeps hand-written `unsafe` out all the same. Everything else matches the workspace.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"

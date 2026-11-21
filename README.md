@@ -6,7 +6,7 @@ A Rust workspace that turns satellites, ground stations and priorities into a co
 explainable contact plan. It is built on [Ephemerust](https://crates.io/crates/ephemerust), and
 its scheduling core is designed to run on the ground **and** onboard a spacecraft.
 
-> **Status: Stage 4 of 5 — files in, plans out.** Ma'at loads
+> **Status: Stage 5 of 5 — a browser demo (built, awaiting sign-off).** Ma'at loads
 > satellites from OMM or TLE, finds every contact opportunity over a set of ground stations,
 > schedules them with a greedy scheduler (flight-safe) or an optimal one (ground only), and gives
 > a stated reason for every pass, scheduled or not. The `maat plan` command does all of that from
@@ -224,6 +224,34 @@ maat plan --catalog <FILE> --stations <FILE> [--requests <FILE>]
   **Chronus Gateway (1.0.0-rc.1) has no schedule input**, so nothing reads this file yet. It is
   Ma'at's side of an interface the gateway does not have.
 
+## In a browser
+
+`demo/` is a page that runs the scheduler itself, compiled to WebAssembly. Choose satellites,
+priorities and ground stations, build the schedule, and replay the greedy scheduler's decisions
+one at a time. Every pass, scheduled or not, shows its reason; selecting a pass that lost
+highlights the pass that beat it. Nothing is sent to a server.
+
+Build it once, then serve the folder (a browser will not load WebAssembly from a file opened
+directly):
+
+```text
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.130 --locked
+./demo/build.ps1                                   # or: sh demo/build.sh
+python -m http.server 8000 --directory demo        # then open http://localhost:8000
+```
+
+- **It is the same code.** `crates/maat-wasm` adds no scheduling logic: it passes text to
+  `maat-ground` and passes the plan back. The page turns your choices into the same TOML station
+  file the `maat` command reads, and shows it to you.
+- **It makes the same plan.** `node demo/check.mjs <native-plan.json>` runs the WebAssembly build
+  and compares it with the native command's output. On a week of the example fleet every pass,
+  time, reason and total matched; four peak elevations out of 615 differed in the fourteenth
+  decimal place, because the two builds use different sine and cosine routines.
+- **The replay order is the scheduler's.** The bridge sorts the passes with the flight crate's own
+  ranking function, and a test replays a week in that order to confirm that nothing scheduled
+  ever conflicts with what came before it.
+
 ## Two schedulers
 
 | | Greedy | Optimal |
@@ -352,6 +380,12 @@ Stated openly, in the spirit of Ephemerust's precision assessment:
   3000-window problem took 8 to 10 s to solve where it took half a second without.
 - **The exports are untested against their targets.** The SatNOGS output matches the documented
   request but has never been sent to the network. The station schedule has no reader yet.
+- **The demo page was checked in one browser.** Headless Chrome on Linux: it loads, builds greedy
+  and optimal plans, replays, selects by mouse and keyboard, reports a bad input, and fits a
+  phone-width screen without sideways scrolling. It has not been tried in Firefox or Safari, and
+  no automated browser test is in the repository.
+- **The optimal scheduler holds up the page while it searches.** The demo limits it to five
+  seconds. It runs on the page's own thread, not in a worker.
 - **Element age is a warning, not a model.** `maat plan` warns when element sets are more than
   14 days from the search window. That figure is a rule of thumb. Nothing in a plan widens a
   window or lowers confidence as elements age.
@@ -384,7 +418,7 @@ Stated openly, in the spirit of Ephemerust's precision assessment:
 | 2 | Scheduler: greedy (flight-safe), then optimal ILP (ground-only) | done |
 | 3 | Explainable output: every pass scheduled or rejected says why | done |
 | 4 | Plug-ins: Chronus export, SatNOGS-compatible format, full CLI | done |
-| 5 | WASM browser demo | later |
+| 5 | WASM browser demo | **built, awaiting sign-off** |
 | — | Onboard pass prediction: heap-free, on the `sgp4` crate, validated against Ephemerust | later |
 
 ## Credits
@@ -397,7 +431,9 @@ Stated openly, in the spirit of Ephemerust's precision assessment:
   [`serde_json`](https://crates.io/crates/serde_json) for JSON output and
   [`thiserror`](https://crates.io/crates/thiserror) for error types. All ground layer only.
 - [`toml`](https://crates.io/crates/toml) and [`serde`](https://crates.io/crates/serde) read
-  station files in the command-line tool only.
+  station files, behind `maat-ground`'s optional `scenario` feature.
+- [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen) connects the browser demo to the
+  scheduler.
 - The SatNOGS observation fields follow the SatNOGS Network's published API. SatNOGS is a
   project of the Libre Space Foundation; Ma'at is not affiliated with it.
 - The reference ISS element set used in tests and examples is public data. The other satellites

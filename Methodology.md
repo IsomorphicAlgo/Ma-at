@@ -4,11 +4,11 @@ A living record of **why** the project is built the way it is: major decisions, 
 the reasoning behind them. Append new entries as decisions are made. Do not silently rewrite
 history; mark an entry superseded or amended instead.
 
-> **Status (2026-11-15): version 0.5.0. Stages 0 to 4 approved by the owner.** Ma'at schedules
-> contact windows with a greedy scheduler in the flight crate or an optimal one on the ground,
-> and every pass in the resulting plan carries a reason code and a detail sentence. `maat plan`
-> builds a plan from a catalog file and a TOML station file and writes it as text, JSON, SatNOGS
-> observations or one station's schedule. Stage 5 (a browser demo) has not started.
+> **Status (2026-11-15): version 0.6.0. Stages 0 to 4 approved by the owner. Stage 5 built and
+> awaiting sign-off.** Ma'at schedules contact windows with a greedy scheduler in the flight
+> crate or an optimal one on the ground, and every pass in the resulting plan carries a reason
+> code and a detail sentence. `maat plan` builds a plan from files. `demo/` runs the same code in
+> a browser.
 
 ---
 
@@ -576,6 +576,69 @@ programming language. Ma'at therefore has no umbrella crate called `maat`, and
 `cargo install maat-cli` installs a command called `maat` that could collide with a command of
 the same name from that project if both are installed.
 
+### D-029 — The station-file reader moves into `maat-ground`, behind a feature
+**Decision:** `maat_ground::scenario` (the TOML reader written for the CLI in D-024) now lives in
+`maat-ground` behind an optional `scenario` feature, off by default.
+**Why this reverses part of D-024:** D-024 kept file reading in the CLI so that the library
+gained no dependency. Stage 5 adds a second front end that must read the same file, and two
+copies of a parser drift. A feature keeps both aims: with default features `maat-ground` still
+has no `serde` derive and no `toml`; a front end that wants the reader asks for it.
+**Verified:** `maat-ground` builds and passes its tests with and without the feature (190 and
+200 unit tests), and its dependency tree without the feature has neither crate.
+
+### D-030 — Stage 5: the browser demo
+**Decision:** a new crate, `maat-wasm`, and a static page, `demo/`.
+**The bridge adds no scheduling logic.** `maat-wasm` exposes four functions to JavaScript
+(`plan`, `catalog`, `scenario`, `version`). Each takes text and returns JSON text. `plan` calls
+`satellites_from_catalog`, `Scenario::add_toml`, `contact_windows` and `plan_contacts_with`,
+the same four calls the `maat` command makes, and returns the `maat.contact-plan/1` document.
+Strings on both sides keep the boundary small enough to read in one sitting.
+**The same file as the command line.** The page turns the chosen satellites, priorities and
+stations into the TOML station file and hands that to the bridge. It also shows the file, so a
+plan made in the browser can be repeated with `maat plan`.
+**Testable without a browser.** The bridge's functions are ordinary Rust; the exported ones are
+one-line wrappers. Eleven native tests cover them, including every error path.
+**"Watch the schedule build":** the greedy scheduler takes passes best first. The bridge returns
+that order (`build_order`) by sorting the scheduler-decided passes with
+`maat_flight::schedule::rank`, the flight crate's own ranking, and the page replays it. A test
+replays a week in that order and checks that every scheduled pass is free of conflict with all
+passes scheduled before it, and that every pass turned down for another finds that other
+already scheduled. If the order were not the scheduler's, one of those would fail. The optimal
+scheduler decides all passes together, so it has no order and the page says so.
+**No new workspace-wide rule broken, one adjusted:** the workspace forbids `unsafe`.
+`#[wasm_bindgen]` generates binding code and marks it `#[allow(unsafe_code)]`, which `forbid`
+rejects, so `maat-wasm` alone uses `deny`. No `unsafe` is written by hand anywhere.
+**The page:** plain HTML, CSS and one JavaScript module. No framework, no package manager, no
+font or script fetched from elsewhere, nothing sent to a server. The example catalog and station
+file are the ones in `examples/`; a test fails if the page's copy differs.
+**Design:** the timeline is the first thing on the page. Each satellite takes one colour, named
+for a stone of Egyptian jewellery (lapis, carnelian, malachite, turquoise, gold), so the
+satellite picker is also the legend. A scheduled pass is a solid bar; a pass that lost is the
+same colour in outline; a pass that never reached the scheduler's ranking is a grey dotted box.
+The only motion is the replay, which the reader can stop, step through, or skip: with "reduce
+motion" set, the finished plan is shown at once.
+**Not published:** `maat-wasm` has `publish = false`. It is a front end.
+**Verification:**
+- *Builds for the browser.* `maat-wasm` compiles for `wasm32-unknown-unknown`, with the optimal
+  solver included; its time limit works there because `microlp` reads the clock through
+  `web-time`.
+- *Same plan as the native build.* The WebAssembly module was run in Node on a week of the
+  example fleet, greedy and optimal, and compared field by field with `maat plan --format json`.
+  Every pass, time, reason, blocker and total matched. Four of 615 peak elevations differed, by at
+  most 6e-14 degrees: the two builds use different sine and cosine routines. `demo/check.mjs`
+  repeats this.
+- *The page works.* Headless Chrome 1320 px and 390 px wide: loads, plans six hours greedy (4 of
+  14 passes, as the command line gives), replays six decisions, selects a pass by mouse and by
+  keyboard, plans a week with the optimal scheduler and a floor, shows a bad start time as an
+  error with its fix, and does not scroll sideways at phone width. No console errors.
+- *Not done:* other browsers; an automated browser test in the repository; a run on Windows.
+**A note on how the browser build was made here:** the prebuilt `wasm32` standard library could
+not be downloaded in the development environment, so the standard library was compiled from
+source (`-Z build-std`). A normal installation uses `rustup target add wasm32-unknown-unknown`,
+as the build scripts say. The same method gave the first check of the **bare-metal build**:
+`maat-flight` compiles for `thumbv7em-none-eabihf` with `core` built from source. Both should
+be confirmed by CI with the prebuilt targets.
+
 ## Open decisions
 
 | # | Question | Needed by |
@@ -683,6 +746,22 @@ the same name from that project if both are installed.
 | Tests catch mistakes | 37 deliberate faults in the floor, the exports, the catalog loader and the CLI: 36 caught, 1 not caught and explained in D-025 | met |
 | No new dependency in the libraries | `toml` and `serde` are in `maat-cli` only; `maat-flight` still has none | met |
 | Owner sign-off | "Approve stage 4" | given |
+
+
+### Stage 5 — Browser demo: **built, awaiting sign-off**
+
+| Deliverable | Evidence | State |
+|---|---|---|
+| Pick satellites and stations | The page's pickers, with a priority for each satellite; a pasted catalog (OMM or TLE) replaces the example fleet | met |
+| Watch the schedule build | Replay of the greedy scheduler's decisions in its own order (D-030); stop, step, or skip | met for greedy; the optimal scheduler has no order to replay |
+| Same scheduling code as flight | `maat-wasm` calls `maat-ground`, which calls `maat-flight`'s `schedule_greedy`; the bridge adds no scheduling logic | met |
+| Same plan as the native build | Week of the example fleet, WebAssembly in Node against `maat plan`: every decision identical, four numbers differ in their last digits | met here; `demo/check.mjs` repeats it |
+| Every pass has a reason on the page | Table of every pass with code, summary and detail; selecting a pass highlights what beat it | met |
+| The page works | Headless Chrome, desktop and phone widths, mouse and keyboard, no console errors | met in one browser; **not tried in Firefox or Safari, and not on Windows** |
+| Bare-metal build of the flight crate | `thumbv7em-none-eabihf`, with `core` compiled from source | met here for the first time; **CI with the prebuilt target still to confirm** |
+| Tests green | 483 passing: 356 unit, 90 integration, 37 doctests, on Rust 1.97 (Linux) | met here; **not yet run on Windows or 1.89** |
+| Tests catch mistakes | 7 deliberate faults in the bridge, each caught. An eighth, removing the upper bound on the search length, sent the test into a ten-year search and was stopped, not waited for | met |
+| Owner sign-off | | **pending** |
 
 ## Attribution
 

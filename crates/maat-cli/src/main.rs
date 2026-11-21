@@ -3,7 +3,8 @@
 //! This is a thin layer over `maat-ground`:
 //!
 //! - `plan` reads a satellite catalog and a station file, and writes a contact plan as text,
-//!   JSON, SatNOGS observations or one station's schedule ([`run`], [`args`], [`scenario`]);
+//!   JSON, SatNOGS observations or one station's schedule ([`run`], [`args`], and
+//!   `maat_ground::scenario` for the station file);
 //! - `codes` prints the reason-code table and `explain` the guidance for one code, both straight
 //!   from the library, so what a user sees cannot drift from what the scheduler emits.
 //!
@@ -12,7 +13,6 @@
 
 mod args;
 mod run;
-mod scenario;
 
 use std::fmt::Write as _;
 use std::process::ExitCode;

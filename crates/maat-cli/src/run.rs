@@ -14,7 +14,7 @@ use maat_ground::{
 };
 
 use crate::args::{Format, PlanArgs};
-use crate::scenario::Scenario;
+use maat_ground::scenario::Scenario;
 
 /// What a command produced.
 #[derive(Debug, PartialEq, Eq)]

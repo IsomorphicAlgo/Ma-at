@@ -23,6 +23,8 @@ It provides:
   once, with its reason code and a sentence of detail.
 - `satellites_from_tle` and `satellites_from_catalog`: a file of two-line element sets, or
   either kind of catalog with the format detected.
+- `scenario::Scenario` (feature `scenario`, off by default): reads stations and requests from
+  the TOML file the `maat` command and the browser demo use.
 - `satnogs_schedule` and `station_schedule`: a plan's scheduled passes as SatNOGS Network
   observations, or as one station's schedule. See the `export` module for what each is tested
   against, which is less than the names suggest.

@@ -11,7 +11,16 @@ readme = "README.md"
 keywords = ["satellite", "scheduling", "ground-station", "contact-plan", "sgp4"]
 categories = ["aerospace", "science"]
 
+[features]
+# Reading stations and requests from TOML (`maat_ground::scenario`). Off by default.
+scenario = ["dep:serde", "dep:toml"]
+
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 maat-flight.workspace = true
 ephemerust.workspace = true
 chrono.workspace = true

@@ -1,0 +1,275 @@
+/* Ma'at demo. The palette is the stones of Egyptian jewellery on limestone: each satellite takes
+   one stone, so the satellite picker is also the chart's legend. One type family throughout. */
+
+:root {
+  --limestone: #eceef1;
+  --paper: #fafaf8;
+  --ink: #17233b;
+  --muted: #586478;
+  --rule: #c6cdd6;
+  --lapis: #1f4e9c;
+  --carnelian: #b4472e;
+  --malachite: #1e7a5c;
+  --turquoise: #1689a0;
+  --gold: #a87a08;
+  --amethyst: #6b4c9a;
+  --unranked: #8f99a8;
+  --face: Optima, Candara, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html { background: var(--limestone); color: var(--ink); }
+
+body {
+  margin: 0 auto;
+  max-width: 82rem;
+  padding: 0 1.25rem 2rem;
+  font: 1rem/1.5 var(--face);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Masthead ---------------------------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 1.5rem;
+  padding: 1.25rem 0 1rem;
+  border-bottom: 3px double var(--ink);
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 2.6rem;
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
+
+.masthead p { margin: 0; max-width: 46rem; color: var(--muted); }
+.masthead .version { margin-left: auto; font-size: 0.875rem; }
+
+/* --- Layout ------------------------------------------------------------------------------ */
+
+.bench {
+  display: grid;
+  grid-template-columns: 19rem minmax(0, 1fr);
+  gap: 1.75rem;
+  padding-top: 1.25rem;
+  align-items: start;
+}
+
+@media (max-width: 60rem) {
+  .bench { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* --- Controls ---------------------------------------------------------------------------- */
+
+.controls fieldset {
+  margin: 0 0 1.1rem;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.controls legend {
+  padding: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.help { margin: 0.1rem 0 0.4rem; font-size: 0.875rem; color: var(--muted); }
+
+.picker { display: grid; gap: 0.15rem; }
+
+.pick {
+  display: grid;
+  grid-template-columns: auto 0.9rem 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+}
+
+.pick .stone {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  background: var(--stone, var(--unranked));
+}
+
+.pick.station { grid-template-columns: auto 1fr; }
+.pick .where { font-size: 0.8125rem; color: var(--muted); }
+
+.pick input[type="number"] { width: 3.6rem; }
+
+.field {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.4rem 0;
+}
+
+.field.short { grid-template-columns: 1fr 5rem; align-items: center; }
+
+.choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem;
+  align-items: start;
+  padding: 0.15rem 0;
+}
+
+.choice small { display: block; font-size: 0.8125rem; color: var(--muted); }
+.choice.sub { margin-left: 1.5rem; }
+.choice input:disabled + span { color: var(--unranked); }
+
+input[type="text"], input[type="number"], textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.25rem 0.4rem;
+  width: 100%;
+}
+
+textarea { font-size: 0.8125rem; line-height: 1.35; resize: vertical; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 3px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0.35rem 0.9rem;
+}
+
+#build {
+  width: 100%;
+  padding: 0.6rem 1rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+button:disabled { opacity: 0.55; cursor: progress; }
+
+:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+
+.problem, .note {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.9375rem;
+  border-left: 4px solid var(--carnelian);
+  background: var(--paper);
+}
+
+.note { border-left-color: var(--gold); }
+.problem strong { display: block; }
+
+details { margin-top: 0.9rem; }
+summary { cursor: pointer; font-weight: 700; }
+
+pre {
+  margin: 0.4rem 0 0;
+  padding: 0.6rem;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+}
+
+/* --- Result ------------------------------------------------------------------------------ */
+
+.summary { margin: 0 0 0.75rem; font-size: 1.2rem; line-height: 1.35; max-width: 52rem; }
+.summary .flag { color: var(--carnelian); }
+
+.timeline {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.5rem 0.75rem 0.25rem;
+  overflow-x: auto;
+}
+
+#chart { display: block; width: 100%; min-width: 34rem; height: auto; font-family: var(--face); }
+
+#chart .row-line { stroke: var(--rule); stroke-width: 1; }
+#chart .tick { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 4; }
+#chart .axis-text { fill: var(--muted); font-size: 12px; }
+#chart .station-name { fill: var(--ink); font-size: 14px; font-weight: 700; }
+#chart .station-count { fill: var(--muted); font-size: 12px; }
+
+#chart .pass { cursor: pointer; }
+#chart .pass rect { stroke: var(--stone); stroke-width: 1.5; }
+#chart .pass.scheduled rect { fill: var(--stone); }
+#chart .pass.refused rect { fill: var(--paper); stroke-dasharray: 3 2; }
+#chart .pass.unranked rect { fill: none; stroke: var(--unranked); stroke-width: 1; stroke-dasharray: 1 2; }
+#chart .pass.waiting { display: none; }
+#chart .pass.current rect, #chart .pass.picked rect { stroke: var(--ink); stroke-width: 3; stroke-dasharray: none; }
+#chart .pass.blocker rect { stroke: var(--gold); stroke-width: 3; }
+#chart .pass:focus-visible { outline: none; }
+#chart .pass:focus-visible rect { stroke: var(--gold); stroke-width: 3.5; stroke-dasharray: none; }
+
+.replay {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  margin-top: 0.75rem;
+}
+
+.step { display: flex; align-items: center; gap: 0.6rem; flex: 1 1 16rem; }
+.step input { flex: 1; accent-color: var(--lapis); }
+.step output { min-width: 5.5rem; }
+
+.caption {
+  margin: 0.6rem 0 0;
+  padding: 0.6rem 0.8rem;
+  min-height: 4.6rem;
+  background: var(--paper);
+  border-left: 4px solid var(--stone, var(--rule));
+  max-width: 62rem;
+}
+
+.caption .code { font-weight: 700; }
+
+.result { min-width: 0; }
+
+/* On a narrow screen the table scrolls sideways inside its own box; the page does not. */
+.decisions { margin-top: 1.75rem; overflow-x: auto; }
+.decisions h2 { margin: 0 0 0.4rem; font-size: 1.3rem; font-weight: 400; letter-spacing: 0.02em; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.35rem 0.75rem 0.35rem 0; }
+thead th { border-bottom: 1px solid var(--ink); font-weight: 700; white-space: nowrap; }
+tbody tr { border-bottom: 1px solid var(--rule); cursor: pointer; }
+tbody tr.picked { background: var(--paper); box-shadow: inset 4px 0 0 var(--stone, var(--ink)); }
+tbody tr.picked td:first-child { padding-left: 0.6rem; }
+td.num, td.name { white-space: nowrap; }
+td .detail { display: block; color: var(--muted); max-width: 46rem; }
+td .swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  background: var(--stone, var(--unranked));
+}
+tr.not td .outcome { color: var(--ink); }
+tr.yes td .outcome { font-weight: 700; }
+
+footer { margin-top: 2.5rem; padding-top: 0.75rem; border-top: 1px solid var(--rule); font-size: 0.875rem; color: var(--muted); }
+footer p { margin: 0; max-width: 60rem; }
+footer a { color: var(--lapis); }
+code { font-family: inherit; font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; }
+}

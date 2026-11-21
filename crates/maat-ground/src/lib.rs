@@ -86,6 +86,8 @@ pub mod export;
 pub mod optimal;
 pub mod plan;
 pub mod satellite;
+#[cfg(feature = "scenario")]
+pub mod scenario;
 pub mod station;
 pub mod survey;
 pub mod time;
